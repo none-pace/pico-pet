@@ -78,6 +78,7 @@ public:
         if(!save()){shortcuts.insert(shortcuts.begin()+index-4,removed);MessageBoxW(owner,L"无法保存更改。",L"屏幕快捷方式",MB_OK|MB_ICONERROR);return;}
         if(removed.icon)DestroyIcon(removed.icon);page=std::min(page,pages()-1);selected=-1;dirty=true;
     }
+    std::wstring path(int index)const{return index>=4 && static_cast<size_t>(index-4)<shortcuts.size()?shortcuts[static_cast<size_t>(index-4)].path:L"";}
     void launch(HWND owner,int index){
         if(index<4 || static_cast<size_t>(index-4)>=shortcuts.size())return;
         const auto& s=shortcuts[static_cast<size_t>(index-4)];SHELLEXECUTEINFOW info{sizeof(info)};info.fMask=SEE_MASK_FLAG_NO_UI;info.hwnd=owner;info.lpVerb=L"open";info.lpFile=s.path.c_str();info.nShow=SW_SHOWNORMAL;

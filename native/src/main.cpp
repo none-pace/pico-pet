@@ -1048,14 +1048,15 @@ public:
         screenDesktop.dirty=true;renderedFace=-1;render(settings.mood,0);
         HMENU popup=createMenu();
         InsertMenuW(popup,0,MF_BYPOSITION|MF_STRING,AddScreenFile,L"添加程序或文件…");InsertMenuW(popup,1,MF_BYPOSITION|MF_STRING,AddScreenFolder,L"添加文件夹…");InsertMenuW(popup,2,MF_BYPOSITION|MF_SEPARATOR,0,nullptr);
-        constexpr UINT openShortcut=4000,removeShortcut=4001,removeBase=4100;
-        if(index>=0 && index<4+static_cast<int>(screenDesktop.count())){InsertMenuW(popup,0,MF_BYPOSITION|MF_STRING,openShortcut,L"打开选中项目");if(index>=4)InsertMenuW(popup,1,MF_BYPOSITION|MF_STRING,removeShortcut,L"从屏幕移除快捷方式");}
+        constexpr UINT openShortcut=4000,removeShortcut=4001,openInTV=4002,removeBase=4100;
+        if(index>=0 && index<4+static_cast<int>(screenDesktop.count())){InsertMenuW(popup,0,MF_BYPOSITION|MF_STRING,openShortcut,L"打开选中项目");if(index>=4){InsertMenuW(popup,1,MF_BYPOSITION|MF_STRING,openInTV,L"在电视中打开");InsertMenuW(popup,2,MF_BYPOSITION|MF_STRING,removeShortcut,L"从屏幕移除快捷方式");}}
         else if(screenDesktop.count()){
             HMENU remove=CreatePopupMenu();for(size_t i=0;i<screenDesktop.count();++i){auto name=screenDesktop.name(static_cast<int>(i)+4);size_t pos=0;while((pos=name.find(L'&',pos))!=std::wstring::npos){name.insert(pos,1,L'&');pos+=2;}AppendMenuW(remove,MF_STRING,removeBase+i,name.c_str());}InsertMenuW(popup,2,MF_BYPOSITION|MF_POPUP,reinterpret_cast<UINT_PTR>(remove),L"移除快捷方式");
         }
         SetForegroundWindow(hwnd);const auto chosen=TrackPopupMenuEx(popup,TPM_RETURNCMD|TPM_RIGHTBUTTON,at.x,at.y,hwnd,nullptr);DestroyMenu(popup);
         PostMessageW(hwnd,WM_NULL,0,0);inMenu=desktopMenu=false;screenDesktop.dirty=true;renderedFace=-1;applyPolicy();
         if(chosen==openShortcut)activateDesktop(index);
+        else if(chosen==openInTV){const auto path=screenDesktop.path(index);if(!path.empty()){openWorkspace();workspace.launchPath(path);}}
         else if(chosen==removeShortcut || (chosen>=removeBase && chosen<removeBase+32)){
             screenDesktop.remove(hwnd,chosen==removeShortcut?index:static_cast<int>(chosen-removeBase)+4);
             renderedFace=-1;render(settings.mood,0);
@@ -1125,6 +1126,7 @@ public:
         case appworkspace::Return:closeWorkspace();return;
         case appworkspace::Detach:workspace.detach();return;
         case appworkspace::Next:workspace.next();return;
+        case appworkspace::Fullscreen:workspace.fullscreen();return;
         case appworkspace::Single:case appworkspace::Desktop:settings.appMode=id==appworkspace::Desktop;workspace.configure(settings.appMode,settings.appFps);saveSettings();return;
         case OpenSettings:openPreferences();return;
         case ImportExpression:case UseExpression:case BuiltinExpression:case ExpressionContain:case ExpressionCover:case ExpressionDark:case ExpressionLight:configureExpression(id);return;
