@@ -1,0 +1,29 @@
+#include <windows.h>
+1 RT_MANIFEST "app.manifest"
+101 ICON "assets/pico.ico"
+#include "assets/poses.rc"
+#include "assets/hd-poses.rc"
+4001 RCDATA "assets/realtime-model.bin"
+4002 RCDATA "assets/realtime-atlas.png"
+4003 RCDATA "assets/realtime-faces.png"
+1 VERSIONINFO
+ FILEVERSION 1,19,1,0
+ PRODUCTVERSION 1,19,1,0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "FileDescription", "PICO Windows 11 Desktop Pet"
+   VALUE "FileVersion", "1.19.1"
+   VALUE "ProductName", "PICO"
+   VALUE "OriginalFilename", "PicoPet.exe"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

@@ -1,0 +1,40 @@
+# Local tools, private captures and user data
+/.git/
+/.playwright-cli/
+/.workbuddy/
+/output/
+/pet2/
+*.log
+*.dump
+*.meta
+*.db
+*.db-shm
+*.db-wal
+settings*.ini
+.env
+.env.*
+*.pem
+*.key
+
+# Build / development outputs
+**/node_modules/
+**/__pycache__/
+*.pyc
+/native/build/
+/native/dist/
+/native/output/
+
+# Required embedded textures must be part of a clean checkout.
+!/native/assets/body-*.png
+!/native/assets/faces-*.png
+!/native/assets/hd-body-*.png
+!/native/assets/hd-faces-*.png
+!/native/assets/realtime-atlas.png
+!/native/assets/realtime-faces.png
+
+# Reproducible model exports and previews
+/tv3d/*.glb
+/tv3d/*.png
+/tv3d/textures/
+/tv3d/validation-gltf.json
+/tv3d/desktop-pet.zip

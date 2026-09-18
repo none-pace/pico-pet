@@ -1,0 +1,42 @@
+{
+  "model": "tv_bot.glb",
+  "screenNode": "screen-display",
+  "screenSize": [
+    168,
+    96
+  ],
+  "expressions": {
+    "idle": "textures/screen-idle.png",
+    "happy": "textures/screen-happy.png",
+    "sleep": "textures/screen-sleep.png",
+    "surprise": "textures/screen-surprise.png",
+    "love": "textures/screen-love.png",
+    "blink": "textures/screen-blink.png",
+    "off": "textures/screen-off.png",
+    "computer": "textures/screen-computer.png",
+    "computer-0": "textures/screen-computer-0.png",
+    "computer-1": "textures/screen-computer-1.png",
+    "computer-2": "textures/screen-computer-2.png",
+    "computer-3": "textures/screen-computer-3.png"
+  },
+  "bounds": [
+    [
+      -47.0,
+      0.0,
+      -17.65
+    ],
+    [
+      47.0,
+      88.6,
+      21.56
+    ]
+  ],
+  "meshCount": 75,
+  "triangleCount": 30124,
+  "version": 5,
+  "origin": "ground-center",
+  "upAxis": "+Y",
+  "forwardAxis": "+Z",
+  "previewOffsetY": -39.5,
+  "pivots": {}
+}

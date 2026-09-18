@@ -1,0 +1,79 @@
+# PICO · Windows 11 电视桌宠
+
+一个可拖拽、旋转和悬浮的 3D 电视桌宠，也是一组按需开启的本机工具。原生 C++20 / Win32 / Direct3D 11 实现，运行时不需要 Python、Node.js、Electron 或浏览器。
+
+## 功能
+
+- **电视桌宠**：LCD 屏幕、像素 / 高清显示、四种机身材质、惯性拖甩、可折叠天线、自定义图片表情。
+- **屏内桌面**：系统模块图标、自定义程序 / 文件 / 文件夹快捷方式、完整右键菜单和自动保存的偏好设置。
+- **命令终端**：电视屏幕内操作 CMD；可启动本机已安装配置的终端工具。开启终端保留当前模型尺寸，滚轮控制缩放。
+- **性能与设备**：CPU、内存、进程资源、硬件分类、驱动版本；可合并同软件、排序、筛选和定格阅读。
+- **磁盘与快照**：目录浏览、文件元数据快照、断点续扫和差异比较。
+- **网络监测**：软件 / 连接 / 网卡视图、TCP 测速、连接历史、事件捕获、流量曲线和 CSV 导出。
+- **安全与日志**：Windows 事件日志、只读注册表浏览、保护状态、程序与文件活动追踪。解读保持简短，原始信息在“证据 / 全部字段”。
+
+## 构建和运行
+
+仅支持 **Windows 11 x64**。开发环境需要 Visual Studio 2022 或更新版本的“使用 C++ 的桌面开发”工作负载、MSVC x64 工具链和 Windows SDK。
+
+在项目根目录执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File native/build.ps1
+Start-Process native/dist/PicoPet.exe
+```
+
+`build.ps1` 自动发现本机工具链，以 C++20、`/W4 /WX` 编译。构建所需的模型和嵌入贴图已包含在仓库中；仅修改 C++ 时不需要重新生成模型。
+
+```powershell
+# 自检（桌宠和系统模块）
+powershell -NoProfile -ExecutionPolicy Bypass -File native/tools/run_checks.ps1
+
+# 生成便携 ZIP 和安装程序
+powershell -NoProfile -ExecutionPolicy Bypass -File native/package.ps1
+```
+
+产物为 `native/dist/PicoPet.exe`、`PICO-Win11-x64.zip` 和 `PICO-Setup.exe`。安装包使用 Windows 自带 IExpress；安装到当前用户目录，并注册 `pet` 命令。安装后重新打开终端，输入 `pet` 唤起桌宠。
+
+## 使用
+
+拖动机身移动，滚轮缩放，右键打开完整菜单。鼠标进入屏幕显示模块图标；底栏齿轮进入设置，加号添加快捷方式，终端图标或实体助手按钮进入命令行。详细操作见 [原生应用说明](native/README.md)。
+
+网络模块默认显示软件概览。查看短连接和 UDP 时，在视图下拉框选择 **实时捕获 · TCP / UDP**。事件捕获需要管理员或相应事件跟踪权限；没有权限时会显示原因，普通连接表仍可使用。Windows 通常约一秒批量交付事件。
+
+## 数据与能力边界
+
+- 设置、快捷方式、图片和索引保存在 `%LOCALAPPDATA%\PicoPet`，卸载保留这些数据。
+- 内置监测与规则解读在本机运行，不上传采集记录。启用 PTR 反查会使用系统 DNS；用户执行的命令和打开的外部程序按各自配置联网。
+- 网络事件记录地址、端口和字节数，不解密 HTTPS，不将反查域名当作请求 URL。短连接仍可能遗漏；上传提示不是恶意或泄露结论。
+- 软件概览汇总已测 TCP；UDP / 短连接事件独立展示，避免重复计算。事件保留最近 10 分钟、最多 8192 个通信对象；丢失或容量丢弃会提示。
+- 网络面板关闭、最小化、切走或暂停后停止采集；“定格阅读”仅固定画面，后台采集继续。桌宠静止时按需渲染，实际占用取决于尺寸、动画和采集负载。
+- 磁盘快照是元数据比较，不包含文件内容，也不是原子备份。系统状态来自 Windows API，不保证系统本身未受篡改。
+
+## 源码结构
+
+| 位置 | 职责 |
+| --- | --- |
+| `native/src/main.cpp` | 应用生命周期、窗口输入、屏内桌面与渲染协调 |
+| `native/src/realtime_model.h`、`pixel_renderer.h` | D3D11 模型、命中检测、像素合成与兼容路径 |
+| `native/src/interaction.h`、`frame_scheduler.h` | 交互运动与帧调度 |
+| `native/src/system_core.h` | 系统模块共享类型及采集接口 |
+| `native/src/system_*.cpp` | 性能、设备、网络、事件、日志、索引和系统窗口 |
+| `native/src/system_cards.h`、`system_presentation.h`、`system_observations.h` | 卡片交互、字段展示、历史与聚合 |
+| `native/src/embedded_console.*` | 屏内终端及进程生命周期 |
+| `native/src/*_tests.h` | 内置回归检查，与功能模块对应 |
+| `native/tools/` | 检查、交互回归、性能测量和资源生成；公共界面测试代码集中在 `test_support.ps1` |
+| `native/assets/` | 编译时嵌入的模型、图标和贴图 |
+| `native/installer/` | 当前用户安装器与 `pet` 命令 |
+| `tv3d/` | 模型生成、Three.js 预览与 glTF 验证，见 [模型说明](tv3d/README.md) |
+
+## 开发约定
+
+1. 优先在现有职责模块中修改；提取公共实现时要替换调用方，不保留同用途旧实现。不要按版本复制源码、临时构建器或截图脚本。
+2. 生产源码清单和编译参数只维护在 `native/build.ps1`，版本只在 `native/resources.rc` 更新。运行数据、截图、测试报告和构建产物不提交。
+3. C++20，四空格缩进；MSVC 警告视为错误。PowerShell 脚本保留 UTF-8 BOM，以兼容 Windows PowerShell 5.1 的中文文本。编辑器规则见 `.editorconfig`。
+4. 修改后运行构建与 `run_checks.ps1`；窗口、渲染、输入的修改再运行对应 `exercise_*.ps1`。界面测试会移动鼠标、打开窗口和改变设置，应在测试桌面运行，提前备份用户配置。
+5. 公共界面测试通过点导入 `test_support.ps1` 使用 Win32 辅助代码；不要截取其他测试脚本再 `Invoke-Expression`。
+6. 发布前从干净检出构建，检查必需资源完整；不要提交本机网络日志、磁盘索引、屏幕截图、账户配置或凭据。
+
+版本变化可通过 Git 历史查看。当前整理版本同时修复了开启终端强制将电视恢复到 640 尺寸的问题。

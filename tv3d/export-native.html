@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>PICO asset export</title>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body><canvas id="export"></canvas><script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+const params=new URLSearchParams(location.search);
+const hd=params.get('hd')==='1',size=hd?576:192;
+const pitchBatch=hd?Math.max(0,Math.min(3,Number(params.get('pitch')||0))):0;
+const states = ['idle','happy','love','surprise','sleep','blink','off','computer','computer-0','computer-1','computer-2','computer-3'];
+const renderer = new THREE.WebGLRenderer({canvas: document.querySelector('canvas'), alpha:true, antialias:hd, preserveDrawingBuffer:true});
+renderer.setSize(size,size); renderer.setPixelRatio(1);renderer.setClearColor(0,0);renderer.outputColorSpace=THREE.SRGBColorSpace;
+const scene=new THREE.Scene();
+const model=(await new GLTFLoader().loadAsync('tv_bot.glb')).scene;
+scene.add(model);
+const screen=model.getObjectByName('screen-display');
+const camera=new THREE.OrthographicCamera(-59,59,59,-59,.1,1000);
+const textures=await Promise.all(states.map(async name=>{
+ const t=await new THREE.TextureLoader().loadAsync(`textures/screen-${name}.png`);
+ t.flipY=false;t.colorSpace=THREE.SRGBColorSpace;t.minFilter=t.magFilter=THREE.NearestFilter;t.generateMipmaps=false;return t;
+}));
+const yawCount=36, pitches=[-12,0,12,24];
+const firstView=hd?pitchBatch*yawCount:0,viewCount=hd?yawCount:yawCount*pitches.length;
+const sheet=document.createElement('canvas');sheet.width=size*states.length;sheet.height=size*viewCount;
+const ctx=sheet.getContext('2d');
+camera.left=-60;camera.right=60;camera.top=60;camera.bottom=-60;camera.updateProjectionMatrix();
+for(let view=firstView;view<firstView+viewCount;view++){
+ const yaw=(view%yawCount)*Math.PI*2/yawCount,pitch=pitches[Math.floor(view/yawCount)]*Math.PI/180;
+ camera.position.set(Math.sin(yaw)*220,44+Math.tan(pitch)*220,Math.cos(yaw)*220-3);camera.lookAt(0,44,-3);
+ for(let frame=0;frame<states.length;frame++){
+  screen.material.map=textures[frame];renderer.render(scene,camera);ctx.drawImage(renderer.domElement,frame*size,(view-firstView)*size);
+ }
+ if(view%6===0)await new Promise(resolve=>setTimeout(resolve,0));
+}
+window.exportPNG=sheet.toDataURL('image/png');
+document.body.dataset.ready='true';
+</script></body></html>

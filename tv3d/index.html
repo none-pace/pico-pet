@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7f5">
+  <link rel="icon" href="data:,">
+  <title>PICO · 像素电视电子宠</title>
+  <link rel="stylesheet" href="viewer.css">
+  <script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+  <script src="./node_modules/lucide/dist/umd/lucide.js" defer></script>
+  <script type="module" src="viewer.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><i data-lucide="tv-minimal"></i><strong>PICO</strong><span>像素电视电子宠</span></div>
+    <a class="icon-button" href="tv_bot.glb" download title="下载 GLB 模型" aria-label="下载 GLB 模型"><i data-lucide="download"></i></a>
+  </header>
+  <main>
+    <section class="workspace" aria-label="电视模型预览">
+      <div class="stage-top"><span class="file-label"><span class="status-dot"></span> PICO-01</span><div class="segments" aria-label="显示方式"><button data-mode="pixel" aria-pressed="true">像素</button><button data-mode="native" aria-pressed="false">高清</button></div></div>
+      <div id="stage"><canvas id="viewport" aria-label="可旋转的像素电视模型"></canvas><div id="loading" role="status">正在加载模型…</div></div>
+      <div class="stage-bottom"><span id="view-label">三分之四视角</span><div class="stage-tools"><button id="reset" class="icon-button" title="重置视角" aria-label="重置视角"><i data-lucide="rotate-ccw"></i></button><button id="snapshot" class="icon-button" title="导出透明 PNG" aria-label="导出透明 PNG"><i data-lucide="camera"></i></button></div></div>
+    </section>
+    <aside aria-label="模型设置">
+      <div class="identity"><div class="eyebrow">CRT COMPANION</div><h1>PICO<span>01</span></h1><div class="online"><span class="status-dot"></span><span id="pet-status">待机中</span></div></div>
+      <section class="setting-section"><h2>表情</h2><div class="expressions" role="group" aria-label="表情">
+        <button data-expression="idle" aria-pressed="true" title="待机" aria-label="待机"><i data-lucide="smile"></i><span>待机</span></button>
+        <button data-expression="happy" aria-pressed="false" title="开心" aria-label="开心"><i data-lucide="laugh"></i><span>开心</span></button>
+        <button data-expression="love" aria-pressed="false" title="喜欢" aria-label="喜欢"><i data-lucide="heart"></i><span>喜欢</span></button>
+        <button data-expression="surprise" aria-pressed="false" title="惊讶" aria-label="惊讶"><i data-lucide="circle-alert"></i><span>惊讶</span></button>
+        <button data-expression="sleep" aria-pressed="false" title="困倦" aria-label="困倦"><i data-lucide="moon"></i><span>困倦</span></button>
+        <button data-expression="off" aria-pressed="false" title="息屏" aria-label="息屏"><i data-lucide="power"></i><span>息屏</span></button>
+      </div></section>
+      <section class="setting-section"><h2>视角</h2><div class="segments views" aria-label="模型视角"><button data-view="front" aria-pressed="false">正面</button><button data-view="three" aria-pressed="true">3/4</button><button data-view="back" aria-pressed="false">背面</button></div>
+        <label class="toggle-row" for="rotate"><span>自动旋转</span><input id="rotate" type="checkbox" role="switch"></label>
+        <label class="toggle-row" for="animate"><span>待机动作</span><input id="animate" type="checkbox" role="switch" checked></label>
+      </section>
+      <section class="setting-section"><div class="range-label"><label for="pixel-size">像素大小</label><output id="pixel-value" for="pixel-size">3 px</output></div><input id="pixel-size" type="range" min="2" max="5" step="1" value="3"></section>
+      <section class="setting-section exports"><h2>导出</h2><button id="export-png" class="command"><i data-lucide="image-down"></i>透明 PNG</button><button id="export-sheet" class="command"><i data-lucide="film"></i>表情精灵图</button><a href="tv_bot.glb" download class="command"><i data-lucide="box"></i>GLB 模型<i data-lucide="arrow-down-to-line" class="trailing"></i></a></section>
+      <div class="aside-footer"><span>PIXEL EDITION</span><span>v3.0</span></div>
+    </aside>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -1,0 +1,8 @@
+build/
+dist/
+output/
+assets/rendered.png
+assets/hd-rendered-*.png
+!assets/body-*.png
+!assets/faces-*.png
+!assets/pico.ico
