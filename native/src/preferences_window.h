@@ -21,7 +21,7 @@ class Window {
     bool loading=false;
     int dpi=96;
     std::vector<Field> fields;
-    std::array<std::vector<HWND>,3> pages;
+    std::array<std::vector<HWND>,4> pages;
     std::vector<windowlayer::App> apps;
     int px(int value)const{return MulDiv(value,dpi,96);}
     HWND control(const wchar_t* type,const wchar_t* text,DWORD style,int x,int y,int w,int h,int id){
@@ -114,13 +114,15 @@ class Window {
         number(L"悬浮幅度（%，0–200）",&Settings::motionAmplitude,0,200);
         number(L"投掷力度（%，0–200）",&Settings::throwGain,0,200);
         toggle(L"待机节能（降低悬浮更新频率）",&Settings::economy);
+        choice(L"应用显示模式",&Settings::appMode,{{L"单应用铺满",0},{L"多窗口桌面",1}});
+        number(L"应用画面上限（FPS，5–30）",&Settings::appFps,5,30);
         HWND title=control(L"STATIC",L"偏好设置",0,24,18,650,28,0);SendMessageW(title,WM_SETFONT,reinterpret_cast<WPARAM>(titleFont),TRUE);
         INITCOMMONCONTROLSEX common{sizeof(common),ICC_TAB_CLASSES};InitCommonControlsEx(&common);
         HWND tabs=control(WC_TABCONTROLW,L"",WS_TABSTOP,24,58,656,30,903);
-        for(const auto* name:{L"外观与屏幕",L"窗口与层级",L"运动与性能"}){TCITEMW tab{};tab.mask=TCIF_TEXT;tab.pszText=const_cast<wchar_t*>(name);TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&tab);}
+        for(const auto* name:{L"外观与屏幕",L"窗口与层级",L"运动与性能",L"电视应用"}){TCITEMW tab{};tab.mask=TCIF_TEXT;tab.pszText=const_cast<wchar_t*>(name);TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&tab);}
         loading=true;
-        std::array<int,3> counts{};
-        for(size_t i=0;i<fields.size();++i){const auto& f=fields[i];const int page=i>=9?2:i>=4 && i<=6?1:0;
+        std::array<int,4> counts{};
+        for(size_t i=0;i<fields.size();++i){const auto& f=fields[i];const int page=i>=17?3:i>=9?2:i>=4 && i<=6?1:0;
             const int slot=counts[page]++,col=slot/4,row=slot%4,x=24+col*348,y=116+row*65;
             pages[page].push_back(control(L"STATIC",f.label,0,x,y,310,20,0));
             HWND c=control(f.choices.empty()?L"EDIT":L"COMBOBOX",L"",WS_TABSTOP|(f.choices.empty()?ES_AUTOHSCROLL:CBS_DROPDOWNLIST|WS_VSCROLL),x,y+21,310,f.choices.empty()?27:230,1000+static_cast<int>(i));
@@ -137,6 +139,10 @@ class Window {
         layerControl(L"STATIC",L"",SS_PATHELLIPSIS,372,239,310,24,913);
         layerControl(L"BUTTON",L"刷新程序列表",WS_TABSTOP|BS_PUSHBUTTON,372,278,150,28,912);
         layerControl(L"STATIC",L"目标不可用时：普通层级",0,372,321,310,22,914);
+        pages[3].push_back(control(L"BUTTON",L"进入电视应用",WS_TABSTOP|BS_PUSHBUTTON,372,116,240,30,920));
+        pages[3].push_back(control(L"BUTTON",L"接入已打开的窗口…",WS_TABSTOP|BS_PUSHBUTTON,372,162,240,30,921));
+        pages[3].push_back(control(L"BUTTON",L"返回桌宠 · 恢复窗口",WS_TABSTOP|BS_PUSHBUTTON,372,208,240,30,922));
+        pages[3].push_back(control(L"STATIC",L"屏内滚轮操作应用，Ctrl+滚轮缩放电视。\nShift+右键打开桌宠菜单。\n兼容模式：传统 Win32 应用；GPU 界面可能黑屏。\n独占全屏和部分弹窗不兼容；退出时恢复窗口。",0,24,270,650,100,923));
         status=control(L"STATIC",L"",0,24,400,650,40,900);
         control(L"BUTTON",L"关闭",BS_DEFPUSHBUTTON|WS_TABSTOP,584,450,96,28,IDCANCEL);
         pages[0].push_back(control(L"BUTTON",L"导入表情图片…",BS_PUSHBUTTON|WS_TABSTOP,24,450,180,28,901));
@@ -152,6 +158,7 @@ class Window {
         case WM_TIMER:if(w==1){KillTimer(h,1);self->commit();return 0;}break;
         case WM_NOTIFY:if(reinterpret_cast<NMHDR*>(l)->idFrom==903 && reinterpret_cast<NMHDR*>(l)->code==TCN_SELCHANGE){self->showPage();return 0;}break;
         case WM_COMMAND:
+            if(LOWORD(w)>=920 && LOWORD(w)<=922){PostMessageW(GetWindow(h,GW_OWNER),WM_COMMAND,LOWORD(w)==920?320:LOWORD(w)==921?321:323,0);return 0;}
             if(LOWORD(w)==912){const auto mode=SendMessageW(GetDlgItem(h,910),CB_GETCURSEL,0,0);self->apps=windowlayer::applications();self->loading=true;self->populateLayer();SendMessageW(GetDlgItem(h,910),CB_SETCURSEL,mode,0);EnableWindow(GetDlgItem(h,911),mode==1);EnableWindow(GetDlgItem(h,912),mode==1);self->loading=false;return 0;}
             if((LOWORD(w)==910 || LOWORD(w)==911) && HIWORD(w)==CBN_SELCHANGE && !self->loading){KillTimer(h,1);self->commit();return 0;}
             if(LOWORD(w)==901 || LOWORD(w)==902){PostMessageW(GetWindow(h,GW_OWNER),WM_COMMAND,LOWORD(w)==901?310:312,0);return 0;}

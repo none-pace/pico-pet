@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
 if (!(Test-Path -LiteralPath $vswhere)) { throw 'Install Visual Studio Build Tools with Desktop development with C++.' }
 $install = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -18,7 +18,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Resource compilation failed: $LASTEXITCODE" }
     # Keep the production translation units and link dependencies in one place.
     $sources = @(
-        'src/main.cpp', 'src/embedded_console.cpp', 'src/system_core.cpp',
+        'src/main.cpp', 'src/app_workspace.cpp', 'src/embedded_console.cpp', 'src/system_core.cpp',
         'src/system_hardware.cpp', 'src/system_network.cpp', 'src/system_network_trace.cpp',
         'src/system_diagnostics.cpp', 'src/system_security.cpp', 'src/system_console.cpp',
         'src/system_index.cpp', 'src/system_window.cpp'

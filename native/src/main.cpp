@@ -39,6 +39,7 @@
 #include "screen_desktop.h"
 #include "custom_expression.h"
 #include "window_layer.h"
+#include "app_workspace.h"
 
 using Microsoft::WRL::ComPtr;
 constexpr wchar_t kClass[] = L"PicoPet.Win11.Native";
@@ -105,6 +106,7 @@ struct Settings {
     bool topmost = true, clickThrough = false, autoHide = true, economy = true;
     bool floating = false;
     bool hd = false;
+    int appMode=0,appFps=15;
     int layerMode=0;
     DWORD layerPid=0;
     std::wstring layerPath;
@@ -204,6 +206,8 @@ public:
     HPOWERNOTIFY displayNotification{}, saverNotification{};
     UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     systemdesk::EmbeddedConsole embeddedConsole;
+    appworkspace::Workspace workspace;
+    bool appPointerDown=false;POINT lastAppPoint{};
     preferences::Window preferencesWindow;
 
     ~Pet() { preferencesWindow.close();stopMotion();stopPose();stopAntennas();setPrecisionTiming(false);if(consoleFont)DeleteObject(consoleFont);if(terminalDC){SelectObject(terminalDC,terminalPrevious);DeleteObject(terminalBitmap);DeleteDC(terminalDC);}releaseSurface(); }
@@ -355,6 +359,7 @@ public:
         settings.x = get(L"x", INT_MIN); settings.y = get(L"y", INT_MIN);
         settings.topmost = get(L"topmost", 1) != 0;
         settings.layerMode=std::clamp(get(L"layerMode",0),0,1);
+        settings.appMode=std::clamp(get(L"appMode",0),0,1);settings.appFps=std::clamp(get(L"appFps",15),5,30);
         wchar_t layerPath[32768]{};GetPrivateProfileStringW(L"PICO",L"layerPath",L"",layerPath,32768,configPath.c_str());settings.layerPath=layerPath;
         wchar_t layerPid[16]{};GetPrivateProfileStringW(L"PICO",L"layerPid",L"0",layerPid,16,configPath.c_str());
         wchar_t* layerPidEnd=nullptr;const auto parsedLayerPid=wcstoull(layerPid,&layerPidEnd,10);
@@ -391,7 +396,7 @@ public:
         put(L"floating", settings.floating);
         put(L"hd", settings.hd);
         put(L"frameRate",settings.frameRate);put(L"pixelThreshold",settings.pixelThreshold);
-        put(L"material",settings.material);
+        put(L"material",settings.material);put(L"appMode",settings.appMode);put(L"appFps",settings.appFps);
         settings.yaw=static_cast<int>(std::lround(baseYaw*1000));settings.pitch=static_cast<int>(std::lround(basePitch*1000));settings.pauseAnimation=paused;
         put(L"yaw",settings.yaw);put(L"pitch",settings.pitch);put(L"paused",paused);
         put(L"motionAmplitude",settings.motionAmplitude);put(L"throwGain",settings.throwGain);put(L"rotationSensitivity",settings.rotationSensitivity);
@@ -405,7 +410,7 @@ public:
     bool shouldHide() const {
         return manuallyHidden || locked || displayOff || suspended || (settings.autoHide && fullscreen);
     }
-    bool canAnimate() const { return !shouldHide() && !paused && !dragging && !inMenu && !embeddedConsole.visible() && !customExpression.active(); }
+    bool canAnimate() const { return !shouldHide() && !paused && !dragging && !inMenu && !embeddedConsole.visible() && !workspace.active() && !customExpression.active(); }
 
     RECT workArea(POINT point) const {
         MONITORINFO info{sizeof(info)};
@@ -567,7 +572,7 @@ public:
         ScreenToClient(hwnd,&cursor);return assistantButtonHit(cursor,pose);
     }
     int cursorScreenButton(int pose) {
-        if(testMode || embeddedConsole.visible() || dragging || paused || inMenu || settings.clickThrough || shouldHide())return -1;
+        if(testMode || embeddedConsole.visible() || workspace.active() || dragging || paused || inMenu || settings.clickThrough || shouldHide())return -1;
         POINT cursor{};GetCursorPos(&cursor);
         if(WindowFromPoint(cursor)!=hwnd)return -1;
         ScreenToClient(hwnd,&cursor);
@@ -659,10 +664,11 @@ public:
         HBRUSH fill=CreateSolidBrush(terminalFocused?RGB(220,255,230):RGB(96,140,118));FillRect(memoryDC,&terminalCaret,fill);DeleteObject(fill);
     }
     void drawEmbeddedConsole(int pose,int tilt,int bob,bool portrait=false) {
+        const bool application=workspace.active();
         const bool console=embeddedConsole.visible();
-        const bool desktop=!console && (screenHovered || desktopMenu || (pressedScreen>=0 && !dragMoved) || (testMode && currentFace>=Computer));
-        if(!console && !desktop && !portrait)return;
-        const int mode=console?2:desktop?1:3;if(screenTextureMode!=mode){screenTextureMode=mode;terminalDirty=true;screenDesktop.dirty=true;}
+        const bool desktop=!application && !console && (screenHovered || desktopMenu || (pressedScreen>=0 && !dragMoved) || (testMode && currentFace>=Computer));
+        if(!application && !console && !desktop && !portrait)return;
+        const int mode=application?4:console?2:desktop?1:3;if(screenTextureMode!=mode){screenTextureMode=mode;terminalDirty=true;screenDesktop.dirty=true;}
         if(!terminalDC){
             BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=800;info.bmiHeader.biHeight=-500;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
             terminalDC=CreateCompatibleDC(memoryDC);terminalBitmap=CreateDIBSection(terminalDC,&info,DIB_RGB_COLORS,reinterpret_cast<void**>(&terminalPixels),nullptr,0);
@@ -673,7 +679,7 @@ public:
         if(mode==1?screenDesktop.dirty:terminalDirty){
             memoryDC=terminalDC;dib=terminalPixels;extent=800;
             try{
-            if(console)drawEmbeddedConsoleContent();else if(imagePixels)std::copy(imagePixels->begin(),imagePixels->end(),terminalPixels);else{
+            if(application)workspace.draw(terminalDC,terminalPixels);else if(console)drawEmbeddedConsoleContent();else if(imagePixels)std::copy(imagePixels->begin(),imagePixels->end(),terminalPixels);else{
                 const int hover=testMode && currentFace>=ComputerPerformance?currentFace-ComputerPerformance:desktopHover;
                 const double fade=desktopFadeStart?std::max(0.0,1-(GetTickCount64()-desktopFadeStart)/120.0):0;
                 screenDesktop.draw(terminalDC,hover,desktopPressed,desktopFading,fade);
@@ -730,12 +736,12 @@ public:
         }
         if(screenHovered || desktopMenu)face=hoveredScreen>=0 && hoveredScreen<4?ComputerPerformance+hoveredScreen:Computer;
         if(pressedScreen>=0 && !dragMoved && !rotating)face=pressedScreen<4?ComputerPerformance+pressedScreen:Computer;
-        if(embeddedConsole.visible())face=ComputerDiagnostics;
-        const bool desktop=!embeddedConsole.visible() && face>=Computer;
-        const bool portrait=!desktop && !embeddedConsole.visible() && face!=Off && customExpression.active();
+        if(embeddedConsole.visible() || workspace.active())face=ComputerDiagnostics;
+        const bool desktop=!workspace.active() && !embeddedConsole.visible() && face>=Computer;
+        const bool portrait=!workspace.active() && !desktop && !embeddedConsole.visible() && face!=Off && customExpression.active();
         if(testMode && desktop && renderedFace!=face)screenDesktop.dirty=true;
         const int button=pressedAssistant?2:embeddedConsole.visible()?3:assistantHovered?1:0;
-        if (!dib || (!(desktop && screenDesktop.dirty) && !((embeddedConsole.visible() || portrait) && terminalDirty) && renderedFace == face && renderedBob == bob && renderedPose==pose && renderedTilt==tilt && (!model.ready() || (lastYaw==poseYaw && lastPitch==posePitch && lastRoll==visualRoll && lastButton==button && lastLeftBend==antennas[0].value && lastRightBend==antennas[1].value)))) return;
+        if (!dib || (!(desktop && screenDesktop.dirty) && !((workspace.active() || embeddedConsole.visible() || portrait) && terminalDirty) && renderedFace == face && renderedBob == bob && renderedPose==pose && renderedTilt==tilt && (!model.ready() || (lastYaw==poseYaw && lastPitch==posePitch && lastRoll==visualRoll && lastButton==button && lastLeftBend==antennas[0].value && lastRightBend==antennas[1].value)))) return;
         if(!model.ready() && (composedPose!=pose || composedFace!=face)){
             const auto& cached=getPose(pose);
             const auto& layout=layoutFor(pose);
@@ -750,7 +756,7 @@ public:
         if(!model.ready())pixelMapping.paint(composition.data(),dib);
         drawEmbeddedConsole(pose,tilt,bob,portrait);
         RenderedFrame frame{face,bob,pose,tilt,button,poseYaw,posePitch,visualRoll,0,antennas[0].value,antennas[1].value};
-        const bool completed=!model.ready() || model.draw(dib,extent,poseYaw,posePitch,visualRoll,bob,settings.hd,face,button,embeddedConsole.visible() || desktop || portrait,settings.material,!resizingSurface && (poseArmed || motionArmed || antennaArmed),static_cast<float>(frame.leftBend),static_cast<float>(frame.rightBend));
+        const bool completed=!model.ready() || model.draw(dib,extent,poseYaw,posePitch,visualRoll,bob,settings.hd,face,button,workspace.active() || embeddedConsole.visible() || desktop || portrait,settings.material,!resizingSurface && (poseArmed || motionArmed || antennaArmed),static_cast<float>(frame.leftBend),static_cast<float>(frame.rightBend));
         frame.preparationMs=(preciseSeconds()-started)*1000;
         if(!completed){pendingFrame=frame;return;}
         presentFrame(frame);
@@ -807,6 +813,7 @@ public:
         stopAnimation();stopMotion();stopPose();stopAntennas();
         blinking = false; reactionUntil = 0;
         hidden = shouldHide();
+        workspace.suspend(hidden || paused);
         watchLayer();
         if((hidden || paused) && embeddedConsole.visible())embeddedConsole.hide();
         if ((hidden || paused) && dragging) cancelDrag();
@@ -933,7 +940,7 @@ public:
     void updateStyles() {
         LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         style = settings.clickThrough ? style|WS_EX_TRANSPARENT : style&~WS_EX_TRANSPARENT;
-        style = embeddedConsole.visible() ? style&~WS_EX_NOACTIVATE : style|WS_EX_NOACTIVATE;
+        style = (workspace.active() || embeddedConsole.visible()) ? style&~WS_EX_NOACTIVATE : style|WS_EX_NOACTIVATE;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
         layer.configure(hwnd,kLayerMessage,settings.layerMode==1,settings.layerPath,settings.layerPid);
         watchLayer();
@@ -941,7 +948,33 @@ public:
         layer.apply(hwnd,settings.layerMode==1,settings.topmost,true);
         if(settings.layerMode==1 && layer.pid())settings.layerPid=layer.pid();
     }
+    void openWorkspace(){
+        if(workspace.active())return;
+        if(embeddedConsole.visible())embeddedConsole.hide();
+        stopAnimation();stopMotion();stopPose();workspace.open(hwnd,settings.appMode,settings.appFps);
+        SetTimer(hwnd,9,33,nullptr);terminalDirty=true;renderedFace=-1;updateStyles();SetForegroundWindow(hwnd);SetFocus(hwnd);render(ComputerDiagnostics,0);
+    }
+    void closeWorkspace(){
+        workspace.close();KillTimer(hwnd,9);appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();terminalDirty=true;renderedFace=-1;updateStyles();applyPolicy();
+    }
+    void workspaceTick(){
+        if(hidden || paused)return;workspace.tick();if(workspace.updated() && !hidden){terminalDirty=true;renderedFace=-1;render(ComputerDiagnostics,0);}
+    }
+    bool workspaceMouse(UINT message,WPARAM buttons,LPARAM coordinates){
+        if(!workspace.active() || dragging)return false;
+        POINT point{GET_X_LPARAM(coordinates),GET_Y_LPARAM(coordinates)};
+        if(message==WM_MOUSEWHEEL){if(GetKeyState(VK_CONTROL)&0x8000)return false;ScreenToClient(hwnd,&point);}
+        if((GetKeyState(VK_MENU)&0x8000) && message==WM_LBUTTONDOWN)return false;
+        bool hit=false;POINT mapped{};
+        if(model.ready()){const auto pick=model.pick(point.x,point.y,extent);hit=pick.kind==1;mapped={static_cast<LONG>(pick.u*800),static_cast<LONG>(pick.v*500)};}
+        else if(screenHit(point,renderedPose)){const int source=pixelMapping.sourceIndex(point.x,point.y);const auto& area=layoutFor(renderedPose);mapped={MulDiv(source%spriteSize()-area.x,800,area.width),MulDiv(source/spriteSize()-area.y,500,area.height)};hit=true;}
+        if(!hit && !appPointerDown)return false;if(hit)lastAppPoint=mapped;else mapped=lastAppPoint;
+        if(message==WM_LBUTTONDOWN){appPointerDown=true;SetCapture(hwnd);SetForegroundWindow(hwnd);SetFocus(hwnd);}
+        workspace.mouse(message,buttons,mapped.x,mapped.y);
+        if(message==WM_LBUTTONUP){appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();}return true;
+    }
     void toggleEmbeddedConsole(){
+        if(workspace.active())closeWorkspace();
         if(embeddedConsole.visible()){embeddedConsole.hide();return;}
         stopAnimation();stopMotion();stopPose();velocityX=velocityY=0;floatRoll=0;
         terminalDirty=true;embeddedConsole.show(hwnd);updateStyles();SetForegroundWindow(hwnd);SetFocus(hwnd);composedFace=renderedFace=-1;render(ComputerDiagnostics,0);saveSettings();
@@ -986,7 +1019,7 @@ public:
         snapshot.yaw=static_cast<int>(std::lround(baseYaw*1000));snapshot.pitch=static_cast<int>(std::lround(basePitch*1000));
         preferencesWindow.open(hwnd,snapshot,[this](const Settings& next){
             const bool resized=next.size!=settings.size,qualityChanged=next.hd!=settings.hd;
-            stopMotion();stopPose();settings=next;paused=settings.pauseAnimation;resetOrientation();
+            stopMotion();stopPose();settings=next;workspace.configure(settings.appMode,settings.appFps);paused=settings.pauseAnimation;resetOrientation();
             if(qualityChanged){for(auto& cached:poseCache)cached=CachedPose{};composition.clear();composedPose=composedFace=-1;}
             renderedFace=-1;
             if(resized){RECT r{};GetWindowRect(hwnd,&r);resizeSurface();place({r.left,r.top},false);}
@@ -1043,6 +1076,8 @@ public:
         auto item=[](HMENU m,UINT id,const wchar_t* label,bool selected=false){AppendMenuW(m,MF_STRING|(selected?MF_CHECKED:0),id,label);};
         item(root,OpenSettings,L"偏好设置…");
         item(root,ScreenShortcuts,L"屏幕快捷方式…");
+        HMENU applications=CreatePopupMenu();item(applications,appworkspace::Open,L"进入电视应用",workspace.active());item(applications,appworkspace::Choose,L"接入已打开的窗口…");item(applications,appworkspace::Launch,L"打开应用…");
+        item(applications,appworkspace::Single,L"单应用铺满",settings.appMode==0);item(applications,appworkspace::Desktop,L"多窗口桌面",settings.appMode==1);item(applications,appworkspace::Detach,L"释放最近接入的窗口");item(applications,appworkspace::Return,L"返回桌宠 · 恢复全部窗口");AppendMenuW(root,MF_POPUP,reinterpret_cast<UINT_PTR>(applications),L"电视应用");
         HMENU expressions=CreatePopupMenu();
         item(expressions,ImportExpression,L"导入图片 / 立绘…");item(expressions,UseExpression,L"使用已导入图片",customExpression.active());
         EnableMenuItem(expressions,UseExpression,MF_BYCOMMAND|(customExpression.available()?MF_ENABLED:MF_GRAYED));
@@ -1084,6 +1119,13 @@ public:
 
     void command(UINT id) {
         switch (id) {
+        case appworkspace::Open:openWorkspace();return;
+        case appworkspace::Choose:openWorkspace();workspace.choose();return;
+        case appworkspace::Launch:openWorkspace();workspace.launch();return;
+        case appworkspace::Return:closeWorkspace();return;
+        case appworkspace::Detach:workspace.detach();return;
+        case appworkspace::Next:workspace.next();return;
+        case appworkspace::Single:case appworkspace::Desktop:settings.appMode=id==appworkspace::Desktop;workspace.configure(settings.appMode,settings.appFps);saveSettings();return;
         case OpenSettings:openPreferences();return;
         case ImportExpression:case UseExpression:case BuiltinExpression:case ExpressionContain:case ExpressionCover:case ExpressionDark:case ExpressionLight:configureExpression(id);return;
         case ScreenShortcuts:{POINT at{};GetCursorPos(&at);desktopContext(at);return;}
@@ -1201,7 +1243,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     try {
         if(pet->taskbarCreated && message==pet->taskbarCreated) { pet->addTray(); return 0; }
         switch(message) {
-        case WM_MOUSEACTIVATE: return pet->embeddedConsole.visible()?MA_ACTIVATE:MA_NOACTIVATE;
+        case WM_MOUSEACTIVATE: return (pet->workspace.active() || pet->embeddedConsole.visible())?MA_ACTIVATE:MA_NOACTIVATE;
         case WM_SETCURSOR:
             if(LOWORD(lp)==HTCLIENT && pet->embeddedConsole.visible()){
                 POINT point{};GetCursorPos(&point);ScreenToClient(hwnd,&point);SetCursor(LoadCursorW(nullptr,pet->screenHit(point,pet->renderedPose)?IDC_IBEAM:IDC_ARROW));return TRUE;
@@ -1222,27 +1264,31 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             if(!pet->dib || point.x<0 || point.y<0 || point.x>=pet->extent || point.y>=pet->extent) return HTTRANSPARENT;
             return (pet->dib[point.y*pet->extent+point.x]>>24)>20 ? HTCLIENT : HTTRANSPARENT;
         }
-        case WM_LBUTTONDOWN: pet->beginDrag((GetKeyState(VK_MENU)&0x8000)!=0);return 0;
+        case WM_LBUTTONDOWN: if(pet->workspaceMouse(message,wp,lp))return 0;pet->beginDrag((GetKeyState(VK_MENU)&0x8000)!=0);return 0;
         case WM_MBUTTONDOWN: pet->beginDrag(true);return 0;
         case WM_MBUTTONUP: pet->endDrag();return 0;
-        case WM_MOUSEWHEEL: pet->zoomWheel(GET_WHEEL_DELTA_WPARAM(wp));return 0;
-        case WM_MOUSEMOVE: pet->mouseMove();return 0;
+        case WM_MOUSEWHEEL: if(pet->workspaceMouse(message,wp,lp))return 0;pet->zoomWheel(GET_WHEEL_DELTA_WPARAM(wp));return 0;
+        case WM_MOUSEMOVE: if(pet->workspaceMouse(message,wp,lp))return 0;pet->mouseMove();return 0;
         case WM_MOUSELEAVE: pet->trackingMouse=false;pet->updateHover();return 0;
-        case WM_LBUTTONUP: pet->endDrag();return 0;
-        case WM_LBUTTONDBLCLK: pet->cancelDrag();pet->applyPolicy();if(!pet->screenHovered)pet->react(Love);return 0;
+        case WM_LBUTTONUP: if(pet->workspaceMouse(message,wp,lp))return 0;pet->endDrag();return 0;
+        case WM_LBUTTONDBLCLK: if(pet->workspaceMouse(message,wp,lp))return 0;pet->cancelDrag();pet->applyPolicy();if(!pet->screenHovered)pet->react(Love);return 0;
         case WM_CAPTURECHANGED: case WM_CANCELMODE:
+            if(pet->appPointerDown){pet->workspace.mouse(WM_LBUTTONUP,0,pet->lastAppPoint.x,pet->lastAppPoint.y);pet->appPointerDown=false;}
             if(pet->dragging) {pet->cancelDrag();pet->applyPolicy();}
             return message==WM_CANCELMODE?DefWindowProcW(hwnd,message,wp,lp):0;
+        case WM_RBUTTONDOWN:case WM_RBUTTONUP:if(!(GetKeyState(VK_SHIFT)&0x8000) && pet->workspaceMouse(message,wp,lp))return 0;break;
         case WM_CONTEXTMENU: {
             POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
             if(point.x==-1 && point.y==-1)GetCursorPos(&point);
             POINT client=point;ScreenToClient(hwnd,&client);
-            if(!pet->embeddedConsole.visible() && pet->screenHit(client,pet->renderedPose)){
+            if(!pet->workspace.active() && !pet->embeddedConsole.visible() && pet->screenHit(client,pet->renderedPose)){
                 int index=pet->hoveredScreen;if(pet->model.ready()){const auto hit=pet->model.pick(client.x,client.y,pet->extent);index=pet->screenDesktop.pick(hit.u,hit.v);}
                 pet->desktopContext(point,index);
             }else pet->menu(point);return 0;
         }
+        case WM_KEYUP:if(pet->workspace.key(message,wp,lp))return 0;break;
         case WM_KEYDOWN:
+            if(pet->workspace.key(message,wp,lp))return 0;
             if(pet->embeddedConsole.visible()){
                 if(wp==VK_PROCESSKEY || wp==VK_PACKET)return DefWindowProcW(hwnd,message,wp,lp);
                 if(pet->embeddedConsole.interactive()){
@@ -1258,6 +1304,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             }
             break;
         case WM_IME_CHAR:
+            if(pet->workspace.key(WM_CHAR,wp,lp))return 0;
             if(pet->embeddedConsole.visible()){pet->embeddedConsole.character(static_cast<wchar_t>(wp));return 0;}
             break;
         case WM_IME_STARTCOMPOSITION:
@@ -1266,6 +1313,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             }
             break;
         case WM_CHAR:
+            if(pet->workspace.key(message,wp,lp))return 0;
             if(pet->embeddedConsole.visible()){
                 if(pet->embeddedConsole.interactive() && (wp==VK_ESCAPE || wp==VK_TAB))return 0;
                 if(wp==VK_RETURN)pet->embeddedConsole.execute();
@@ -1284,6 +1332,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             else if(LOWORD(lp)==NIN_SELECT || LOWORD(lp)==NIN_KEYSELECT) {pet->manuallyHidden=false;pet->applyPolicy();}
             return 0;
         case WM_TIMER:
+            if(wp==9){pet->workspaceTick();return 0;}
             if(wp==kLayerWatchTimer){if(pet->settings.layerMode==1 && !pet->shouldHide())pet->syncTopmost();return 0;}
             if(wp==kLayerTimer){pet->refreshLayer();return 0;}
             if(wp==kAntennaTimer){pet->antennaTick();return 0;}
@@ -1296,6 +1345,10 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         case systemdesk::kEmbeddedConsoleClosed:pet->embeddedConsoleClosed();return 0;
         case systemdesk::kEmbeddedConsoleUpdated:pet->embeddedConsoleUpdated();return 0;
         case kTestMessage:
+            if(wp==80)return reinterpret_cast<LRESULT>(pet->workspace.host());
+            if(wp==81)return pet->workspace.attach(reinterpret_cast<HWND>(lp));
+            if(wp==82)return pet->workspace.count();
+            if(wp==83)return static_cast<LRESULT>(pet->workspace.frames());
             if(wp==0)return static_cast<LRESULT>(pet->draws);
             if(wp==1)return static_cast<LRESULT>(pet->timerWakes);
             if(wp==2)return (pet->hidden ? 1 : 0)|(pet->animationArmed ? 2 : 0)|(pet->paused ? 4 : 0)|(pet->motionArmed ? 8 : 0)|(pet->poseArmed ? 16 : 0);
@@ -1390,7 +1443,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         case WM_CLOSE: DestroyWindow(hwnd);return 0;
         case WM_DESTROY:
             pet->layer.stop();KillTimer(hwnd,kLayerTimer);KillTimer(hwnd,kLayerWatchTimer);
-            pet->embeddedConsole.shutdown();
+            pet->workspace.close();KillTimer(hwnd,9);pet->embeddedConsole.shutdown();
             systemdesk::shutdown();
             pet->saveSettings();pet->stopAnimation();pet->stopMotion();pet->stopPose();pet->stopAntennas();pet->cancelDrag();
             if(pet->trayAdded)Shell_NotifyIconW(NIM_DELETE,&pet->tray);
@@ -1744,6 +1797,7 @@ int selfTest(Pet& pet, const std::filesystem::path& output) {
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     if(!windows11()){MessageBoxW(nullptr,L"PICO 仅支持 Windows 11 x64。",L"PICO",MB_OK|MB_ICONINFORMATION);return 1;}
     int argc{};LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);
+    if(argc>=3 && wcscmp(argv[1],L"--app-host")==0){const std::wstring mapping=argv[2];LocalFree(argv);return appworkspace::runHost(mapping.c_str());}
     const bool testing=argc>=2 && wcscmp(argv[1],L"--self-test")==0;
     const bool systemTesting=argc>=2 && wcscmp(argv[1],L"--system-test")==0;
     std::filesystem::path report=argc>=3 ? argv[2] : L"self-test.json";
