@@ -26,6 +26,8 @@ try {
     $options = @('/nologo','/std:c++20','/utf-8','/O2','/MT','/EHsc','/W4','/WX',
         '/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/DNOMINMAX','/D_WIN32_WINNT=0x0A00',
         '/Fo:build/','/Fe:dist/PicoPet.exe')
+    & cl.exe /nologo /std:c++20 /utf-8 /O2 /MT /EHsc /W4 /WX /DUNICODE /D_UNICODE /LD src/app_input_hook.cpp /Fo:build/app_input_hook.obj /Fe:dist/PicoPet.Input.dll /link user32.lib /DYNAMICBASE /NXCOMPAT /IMPLIB:build/PicoPet.Input.lib
+    if ($LASTEXITCODE -ne 0) { throw "Application input hook build failed: $LASTEXITCODE" }
     $libraries = @('user32.lib','gdi32.lib','shell32.lib','ole32.lib','windowscodecs.lib',
         'wtsapi32.lib','dwmapi.lib','advapi32.lib','powrprof.lib','psapi.lib','winmm.lib',
         'comctl32.lib','comdlg32.lib','iphlpapi.lib','ws2_32.lib','winsqlite3.lib','setupapi.lib',

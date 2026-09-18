@@ -57,7 +57,8 @@ public static class AppFixture {
  var edit=new TextBox{Location=new Point(60,70),Size=new Size(400,32),Font=new Font("Segoe UI",16)};
  var button=new Button{Text="Change colour",Location=new Point(60,140),Size=new Size(180,48)};
  var wheel=new WheelPanel{Location=new Point(500,40),Size=new Size(240,280),AutoScroll=true,BackColor=Color.DarkSlateGray};wheel.Controls.Add(new Label{Location=new Point(10,900),Text="Bottom"});
- button.Click+=(s,e)=>{form.BackColor=Color.FromArgb(155,45,72);form.Text="PICO Application Clicked";};form.Controls.Add(edit);form.Controls.Add(button);form.Controls.Add(wheel);Application.Run(form);}
+ bool clicked=false;button.MouseEnter+=(s,e)=>{if(!clicked)form.Text="PICO Application Hover";};button.MouseLeave+=(s,e)=>{if(!clicked)form.Text="PICO Application Left";};
+ button.Click+=(s,e)=>{clicked=true;form.BackColor=Color.FromArgb(155,45,72);form.Text="PICO Application Clicked";};form.Controls.Add(edit);form.Controls.Add(button);form.Controls.Add(wheel);Application.Run(form);}
 }
 '@
 $config=Join-Path $env:LOCALAPPDATA 'PicoPet/settings.ini'
@@ -119,6 +120,13 @@ try {
   return $false
  }
  Await {HasInput} 'Projected typing did not reach the app'
+ $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r);$extent=$r.Right-$r.Left
+ $hoverX=[int]($extent*(.5+(140/800.0-.5)*83.6/120));$hoverY=[int]($extent*(.5+(44-(42.5+(.5-160/500.0)*47.6))/120));$hoverPoint=[IntPtr](($hoverY -shl 16) -bor $hoverX)
+ [void][EmbeddedWin]::SetCursorPos(($r.Left+$hoverX),($r.Top+$hoverY));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,$hoverPoint)
+ Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Hover'} 'Application hover did not enter'
+ for($sample=0;$sample -lt 20;$sample++){Start-Sleep -Milliseconds 100;if([AppCheck]::Title($appWindow) -ne 'PICO Application Hover'){throw 'Stationary hover was lost'}}
+ [void](Send $pet 0x2a3)
+ Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Left'} 'Real pointer leave did not clear hover'
  ClickScreen 140 160
  Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Clicked'} 'Projected button click did not reach the app'
  $expected='TV_INPUT_OK'
@@ -155,7 +163,12 @@ try {
  Start-Sleep -Milliseconds 600
  $bounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$bounds)
  if($bounds.Right-$bounds.Left -gt 800 -or $bounds.Bottom-$bounds.Top -gt 500){throw 'Maximize escaped the application container'}
- [void](Send $pet 0x111 323)
+ $petRect=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$petRect);$extent=$petRect.Right-$petRect.Left;$buttonPoint=$null
+ for($y=[int]($extent*.71);$y -lt $extent*.78 -and !$buttonPoint;$y+=3){for($x=[int]($extent*.75);$x -lt $extent*.82;$x+=3){[void][EmbeddedWin]::SetCursorPos(($petRect.Left+$x),($petRect.Top+$y));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,[IntPtr](($y -shl 16) -bor $x));if((Send $pet 0x8003 27) -eq 1){$buttonPoint=[IntPtr](($y -shl 16) -bor $x);break}}}
+ if(!$buttonPoint){throw 'Physical return button could not be reached'}
+ [void][EmbeddedWin]::SendMessage($pet,0x201,[IntPtr]1,$buttonPoint);[void][EmbeddedWin]::SendMessage($pet,0x202,[IntPtr]0,$buttonPoint)
+ Await {(Send $pet 0x8003 80) -eq 0} 'Physical button did not return to the TV desktop'
+ if((Send $pet 0x8003 9) -lt 7){throw 'Physical return did not display the desktop'}
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Original window parent not restored'
  $after=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$after)
  if(([AppCheck]::GetWindowLongPtr($appWindow,-16).ToInt64() -band 0x40000000) -ne 0){throw 'Restored window is still a child'}
@@ -171,7 +184,7 @@ try {
  Stop-Process -Id $petId
  $pet=[IntPtr]::Zero
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Helper failed to restore after owner exit'
- @{nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
+ @{stableHover=$true;realLeave=$true;physicalReturn=$true;nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
  Get-Content (Join-Path $root 'output/app-workspace-checks.json')
  if($Browser){
   $browserPath=Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'

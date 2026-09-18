@@ -4,6 +4,6 @@ if (!(Test-Path -LiteralPath $exe)) { throw 'Run build.ps1 first.' }
 $readme = Join-Path $PSScriptRoot 'dist/README.md'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $readme -Force
 $archive = Join-Path $PSScriptRoot 'dist/PICO-Win11-x64.zip'
-Compress-Archive -LiteralPath $exe,$readme -DestinationPath $archive -Force
+Compress-Archive -LiteralPath $exe,$readme,(Join-Path $PSScriptRoot 'dist/PicoPet.Input.dll') -DestinationPath $archive -Force
 Write-Host "Portable package: $archive"
 & (Join-Path $PSScriptRoot 'build-installer.ps1')

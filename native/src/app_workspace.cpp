@@ -138,8 +138,10 @@ struct Capture {
 };
 struct Entry {HWND window=nullptr,parent=nullptr,owner=nullptr;DWORD pid=0;LONG_PTR style=0,exstyle=0;WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};RECT rect{};};
 struct Host {
+    struct InputHook {DWORD thread;HHOOK hook;};
+    HMODULE inputModule=nullptr;HOOKPROC inputProc=nullptr;std::vector<InputHook> inputHooks;std::vector<HWND> hoverWindows;
     Link link;Capture capture;HWND window=nullptr,focus=nullptr,drag=nullptr,pointerCapture=nullptr;HANDLE parent=nullptr;
-    ~Host(){release();}
+    ~Host(){release();if(inputModule)FreeLibrary(inputModule);}
     std::vector<Entry> entries;bool immersive=false,paused=false;int mode=0,fps=60,resolution=0,width=Width,height=Height;POINT origin{};RECT dragRect{};ULONGLONG checked=0;
     void status(const wchar_t* text){if(link.lock()){wcscpy_s(link.data->status,text);link.data->count=static_cast<LONG>(entries.size());++link.data->generation;link.unlock();}}
     void restore(Entry& e){
@@ -149,7 +151,20 @@ struct Host {
         SetWindowPos(e.window,nullptr,e.rect.left,e.rect.top,e.rect.right-e.rect.left,e.rect.bottom-e.rect.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED);
         SetWindowPlacement(e.window,&e.placement);ShowWindow(e.window,(e.style&WS_VISIBLE)?(e.placement.showCmd==SW_SHOWMINIMIZED?SW_SHOWMINIMIZED:SW_SHOWNOACTIVATE):SW_HIDE);
     }
-    void release(){capture.stop();pointerCapture=nullptr;for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
+    void clearHover(){for(HWND h:hoverWindows){if(GetPropW(h,L"PicoPet.ProjectedHover")==window){RemovePropW(h,L"PicoPet.ProjectedHover");PostMessageW(h,WM_MOUSELEAVE,0,0);}}hoverWindows.clear();}
+    bool trackHover(HWND target){
+        const DWORD thread=GetWindowThreadProcessId(target,nullptr);
+        if(std::none_of(inputHooks.begin(),inputHooks.end(),[thread](const InputHook& hook){return hook.thread==thread;})){
+            if(!inputModule){wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);const auto library=std::filesystem::path(path).parent_path()/L"PicoPet.Input.dll";inputModule=LoadLibraryW(library.c_str());if(inputModule)inputProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppInputMessage"));}
+            HHOOK hook=inputProc?SetWindowsHookExW(WH_GETMESSAGE,inputProc,inputModule,thread):nullptr;
+            if(!hook)return false;inputHooks.push_back({thread,hook});
+        }
+        std::vector<HWND> next;for(HWND h=target;h && h!=window;h=GetParent(h))next.push_back(h);
+        if(next==hoverWindows)return true;
+        for(HWND old:hoverWindows)if(std::find(next.begin(),next.end(),old)==next.end() && GetPropW(old,L"PicoPet.ProjectedHover")==window){RemovePropW(old,L"PicoPet.ProjectedHover");PostMessageW(old,WM_MOUSELEAVE,0,0);}
+        for(HWND h:next)SetPropW(h,L"PicoPet.ProjectedHover",window);hoverWindows=std::move(next);return true;
+    }
+    void release(){capture.stop();clearHover();for(auto& hook:inputHooks)UnhookWindowsHookEx(hook.hook);inputHooks.clear();pointerCapture=nullptr;for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
     HWND application(HWND child)const{while(IsWindow(child) && GetParent(child)!=window)child=GetParent(child);return IsWindow(child) && GetParent(child)==window?child:nullptr;}
     HWND keyboardTarget()const{
         HWND root=application(focus);if(!root)return nullptr;
@@ -208,6 +223,7 @@ struct Host {
         return target;
     }
     void pointer(UINT message,WPARAM buttons,POINT point){
+        if(message==WM_MOUSELEAVE){clearHover();return;}
         if(!immersive)point={MulDiv(point.x,width,Width),MulDiv(point.y,height,Height)};
         if(drag){
             if(message==WM_MOUSEMOVE){const int w=dragRect.right-dragRect.left,h=dragRect.bottom-dragRect.top;SetWindowPos(drag,nullptr,std::clamp<int>(dragRect.left+point.x-origin.x,0,std::max(0,width-w)),std::clamp<int>(dragRect.top+point.y-origin.y,0,std::max(0,height-h)),0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);}
@@ -215,6 +231,7 @@ struct Host {
         }
         if(immersive){HWND top=GetWindow(window,GW_CHILD);if(top){const RECT area=contentRect(top);POINT clientOrigin{};ClientToScreen(top,&clientOrigin);RECT outer{};GetWindowRect(top,&outer);point={area.left+MulDiv(point.x,area.right-area.left,Width)+outer.left-clientOrigin.x,area.top+MulDiv(point.y,area.bottom-area.top,Height)+outer.top-clientOrigin.y};MapWindowPoints(top,window,&point,1);}}
         HWND target=IsWindow(pointerCapture) && (message==WM_MOUSEMOVE || message==WM_LBUTTONUP)?pointerCapture:childAt(point);if(target==window)return;
+        if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN)trackHover(target);
         POINT screen=point;ClientToScreen(window,&screen);DWORD_PTR area=HTCLIENT;
         if(message!=WM_MOUSEMOVE && message!=WM_MOUSEWHEEL && message!=WM_MOUSEHWHEEL)SendMessageTimeoutW(target,WM_NCHITTEST,0,MAKELPARAM(screen.x,screen.y),SMTO_ABORTIFHUNG|SMTO_BLOCK,30,&area);
         if(message==WM_LBUTTONDOWN){pointerCapture=target;activate(target);HWND root=application(target);SetWindowPos(root,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
@@ -249,12 +266,12 @@ struct Host {
         case WM_TIMER:self->tick();return 0;
         case Attach:self->attach(reinterpret_cast<HWND>(l));return 0;
         case Configure:self->mode=LOWORD(w);self->resolution=std::clamp<int>(HIWORD(w),0,3);self->fps=std::clamp(static_cast<int>(l),5,60);self->capture.rate(self->fps);self->layout();return 0;
-        case Release:if(!self->entries.empty()){self->restore(self->entries.back());self->entries.pop_back();self->focus=self->entries.empty()?nullptr:self->entries.back().window;self->layout();}return 0;
+        case Release:if(!self->entries.empty()){self->clearHover();self->restore(self->entries.back());self->entries.pop_back();self->focus=self->entries.empty()?nullptr:self->entries.back().window;self->layout();}return 0;
         case Pointer:self->pointer(LOWORD(w),w>>16,{GET_X_LPARAM(l),GET_Y_LPARAM(l)});return 0;
         case Immersive:self->immersive=!self->immersive;self->capture.immersive(self->immersive);self->layout();return 0;
         case Cycle:if(self->entries.size()>1){std::rotate(self->entries.begin(),self->entries.begin()+1,self->entries.end());self->focus=self->entries.back().window;SetWindowPos(self->focus,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}return 0;
         case Keyboard:if(HWND target=self->keyboardTarget()){PostMessageW(target,LOWORD(w),HIWORD(w),l);self->capture.wake();}return 0;
-        case Paused:self->paused=w!=0;self->capture.pause(self->paused);return 0;
+        case Paused:self->paused=w!=0;if(self->paused)self->clearHover();self->capture.pause(self->paused);return 0;
         case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
         case WM_CLOSE:DestroyWindow(h);return 0;
         case WM_DESTROY:self->release();PostQuitMessage(0);return 0;

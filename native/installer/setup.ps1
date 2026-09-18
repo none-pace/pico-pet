@@ -5,7 +5,7 @@ $stateFile=Join-Path $installRoot 'install-state.json'
 $registration='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PicoPet.Win11'
 $shortcutRoot=Join-Path ([Environment]::GetFolderPath('Programs')) 'PICO Desktop Pet'
 $shortcut=Join-Path $shortcutRoot 'PICO.lnk'
-$payload=@('PicoPet.exe','README.md','pet.cmd','setup.ps1')
+$payload=@('PicoPet.exe','PicoPet.Input.dll','README.md','pet.cmd','setup.ps1')
 $mutex=$null;$locked=$false;$stage=$null
 Add-Type -TypeDefinition @'
 using System;

@@ -128,7 +128,7 @@ public:
     int renderedFace = -1, renderedBob = 0, renderedPose = -1, renderedRoll = 0, renderedTilt = 0;
     int composedPose=-1,composedFace=-1;
     int currentFace=Idle;
-    bool screenHovered=false,assistantHovered=false,trackingMouse=false;
+    bool screenHovered=false,assistantHovered=false,trackingMouse=false,desktopPinned=false;
     int hoveredScreen=-1;
     int pressedScreen=-1;
     bool pressedAssistant=false;
@@ -742,13 +742,13 @@ public:
             desktopHover=hoveredScreen;desktopPressed=pressedScreen;screenDesktop.dirty=true;
             if(desktopFadeStart)SetTimer(hwnd,kDesktopTimer,frameDelay(),nullptr);
         }
-        if(screenHovered || desktopMenu)face=hoveredScreen>=0 && hoveredScreen<4?ComputerPerformance+hoveredScreen:Computer;
+        if(screenHovered || desktopMenu || desktopPinned)face=hoveredScreen>=0 && hoveredScreen<4?ComputerPerformance+hoveredScreen:Computer;
         if(pressedScreen>=0 && !dragMoved && !rotating)face=pressedScreen<4?ComputerPerformance+pressedScreen:Computer;
         if(embeddedConsole.visible() || workspace.active())face=ComputerDiagnostics;
         const bool desktop=!workspace.active() && !embeddedConsole.visible() && face>=Computer;
         const bool portrait=!workspace.active() && !desktop && !embeddedConsole.visible() && face!=Off && customExpression.active();
         if(testMode && desktop && renderedFace!=face)screenDesktop.dirty=true;
-        const int button=pressedAssistant?2:embeddedConsole.visible()?3:assistantHovered?1:0;
+        const int button=pressedAssistant?2:assistantHovered?1:(workspace.active() || embeddedConsole.visible())?3:0;
         if (!dib || (!(desktop && screenDesktop.dirty) && !((workspace.active() || embeddedConsole.visible() || portrait) && terminalDirty) && renderedFace == face && renderedBob == bob && renderedPose==pose && renderedTilt==tilt && (!model.ready() || (lastYaw==poseYaw && lastPitch==posePitch && lastRoll==visualRoll && lastButton==button && lastLeftBend==antennas[0].value && lastRightBend==antennas[1].value)))) return;
         if(!model.ready() && (composedPose!=pose || composedFace!=face)){
             const auto& cached=getPose(pose);
@@ -958,6 +958,7 @@ public:
     }
     void openWorkspace(){
         if(workspace.active())return;
+        desktopPinned=false;
         if(embeddedConsole.visible())embeddedConsole.hide();
         stopAnimation();stopMotion();stopPose();workspace.open(hwnd,settings.appMode,settings.appFps,settings.appResolution);
         SetTimer(hwnd,9,100,nullptr);terminalDirty=true;renderedFace=-1;updateStyles();render(ComputerDiagnostics,0);
@@ -976,12 +977,14 @@ public:
         bool hit=false;POINT mapped{};
         if(model.ready()){const auto pick=model.pick(point.x,point.y,extent);hit=pick.kind==1;mapped={static_cast<LONG>(pick.u*800),static_cast<LONG>(pick.v*500)};}
         else if(screenHit(point,renderedPose)){const int source=pixelMapping.sourceIndex(point.x,point.y);const auto& area=layoutFor(renderedPose);mapped={MulDiv(source%spriteSize()-area.x,800,area.width),MulDiv(source/spriteSize()-area.y,500,area.height)};hit=true;}
-        if(!hit && !appPointerDown)return false;if(hit)lastAppPoint=mapped;else mapped=lastAppPoint;
+        if(!hit && !appPointerDown){workspace.mouse(WM_MOUSELEAVE,0,0,0);return false;}if(hit)lastAppPoint=mapped;else mapped=lastAppPoint;
+        if(!trackingMouse){TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};trackingMouse=TrackMouseEvent(&track)!=FALSE;}
         if(message==WM_LBUTTONDOWN)appPointerDown=true;
         workspace.mouse(message,buttons,mapped.x,mapped.y);
         if(message==WM_LBUTTONUP){appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();}return true;
     }
     void toggleEmbeddedConsole(){
+        desktopPinned=false;
         if(workspace.active())closeWorkspace();
         if(embeddedConsole.visible()){embeddedConsole.hide();return;}
         stopAnimation();stopMotion();stopPose();velocityX=velocityY=0;floatRoll=0;
@@ -1235,7 +1238,7 @@ public:
         const auto k=trajectory.measure(static_cast<double>(now)/1000);
         if(!clicked)releaseVelocity(now);
         flushDrag(!settings.floating); cancelDrag(); saveSettings();
-        applyPolicy();if(clicked && assistant)toggleEmbeddedConsole();else if(clicked && screenPage>=0)activateDesktop(screenPage);else if(clicked)react(Happy);else if(now<shakeUntil || k.shaking)react(Blink);else if(k.velocity.length()>650)react(Surprise);
+        applyPolicy();if(clicked && assistant){if(workspace.active()){closeWorkspace();desktopPinned=true;screenDesktop.dirty=true;renderedFace=-1;render(Computer,0);}else toggleEmbeddedConsole();}else if(clicked && screenPage>=0)activateDesktop(screenPage);else if(clicked)react(Happy);else if(now<shakeUntil || k.shaking)react(Blink);else if(k.velocity.length()>650)react(Surprise);
     }
 };
 
@@ -1284,7 +1287,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         case WM_MOUSEWHEEL: if(pet->workspaceMouse(message,wp,lp))return 0;pet->zoomWheel(GET_WHEEL_DELTA_WPARAM(wp));return 0;
         case WM_MOUSEHWHEEL:if(pet->workspaceMouse(message,wp,lp))return 0;break;
         case WM_MOUSEMOVE: if(pet->workspaceMouse(message,wp,lp))return 0;pet->mouseMove();return 0;
-        case WM_MOUSELEAVE: pet->trackingMouse=false;pet->updateHover();return 0;
+        case WM_MOUSELEAVE: pet->trackingMouse=false;if(pet->workspace.active())pet->workspace.mouse(WM_MOUSELEAVE,0,0,0);pet->updateHover();return 0;
         case WM_LBUTTONUP: if(pet->workspaceMouse(message,wp,lp))return 0;pet->endDrag();return 0;
         case WM_LBUTTONDBLCLK: if(pet->workspaceMouse(message,wp,lp))return 0;pet->cancelDrag();pet->applyPolicy();if(!pet->screenHovered)pet->react(Love);return 0;
         case WM_CAPTURECHANGED: case WM_CANCELMODE:

@@ -4,6 +4,7 @@ if(!(Test-Path -LiteralPath $exe)){throw 'Run build.ps1 first.'}
 $stage=Join-Path $PSScriptRoot 'build/setup'
 [void](New-Item -ItemType Directory -Path $stage -Force)
 Copy-Item -LiteralPath $exe -Destination (Join-Path $stage 'PicoPet.exe') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'dist/PicoPet.Input.dll') -Destination (Join-Path $stage 'PicoPet.Input.dll') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $stage 'README.md') -Force
 foreach($file in @('setup.ps1','pet.cmd')){
  Copy-Item -LiteralPath (Join-Path $PSScriptRoot "installer/$file") -Destination (Join-Path $stage $file) -Force
@@ -47,6 +48,7 @@ FILE0="PicoPet.exe"
 FILE1="README.md"
 FILE2="pet.cmd"
 FILE3="setup.ps1"
+FILE4="PicoPet.Input.dll"
 [SourceFiles]
 SourceFiles0=$stage\
 [SourceFiles0]
@@ -54,6 +56,7 @@ SourceFiles0=$stage\
 %FILE1%=
 %FILE2%=
 %FILE3%=
+%FILE4%=
 "@
 [IO.File]::WriteAllText($sed,($config -replace "`r?`n","`r`n")+"`r`n",[Text.Encoding]::Default)
 $iexpress=Join-Path $env:SystemRoot 'System32/iexpress.exe'
