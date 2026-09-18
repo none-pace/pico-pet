@@ -117,7 +117,7 @@ class Window {
         choice(L"应用显示模式",&Settings::appMode,{{L"单应用铺满",0},{L"多窗口桌面",1}});
         number(L"应用画面上限（FPS，5–30）",&Settings::appFps,5,30);
         choice(L"快捷方式默认打开位置",&Settings::shortcutTarget,{{L"电视屏幕内（默认）",0},{L"Windows 桌面",1}});
-        choice(L"电视应用画布分辨率",&Settings::appResolution,{{L"800 × 456 · 大字 / 低占用",0},{L"1280 × 720 · 更多内容",1},{L"1600 × 900 · 宽广视野",2}});
+        choice(L"电视应用画布分辨率",&Settings::appResolution,{{L"自动适配 · 屏幕比例与系统缩放",3},{L"800 × 456 · 大字 / 低占用",0},{L"1280 × 730 · 更多内容",1},{L"1600 × 912 · 宽广视野",2}});
         HWND title=control(L"STATIC",L"偏好设置",0,24,18,650,28,0);SendMessageW(title,WM_SETFONT,reinterpret_cast<WPARAM>(titleFont),TRUE);
         INITCOMMONCONTROLSEX common{sizeof(common),ICC_TAB_CLASSES};InitCommonControlsEx(&common);
         HWND tabs=control(WC_TABCONTROLW,L"",WS_TABSTOP,24,58,656,30,903);
@@ -144,7 +144,7 @@ class Window {
         pages[3].push_back(control(L"BUTTON",L"进入电视应用",WS_TABSTOP|BS_PUSHBUTTON,372,116,240,30,920));
         pages[3].push_back(control(L"BUTTON",L"接入已打开的窗口…",WS_TABSTOP|BS_PUSHBUTTON,372,162,240,30,921));
         pages[3].push_back(control(L"BUTTON",L"返回桌宠 · 恢复窗口",WS_TABSTOP|BS_PUSHBUTTON,372,208,240,30,922));
-        pages[3].push_back(control(L"STATIC",L"画布独立于桌面分辨率；更高分辨率显示更多内容，文字会变小。\nCtrl+滚轮缩放电视，Shift+右键打开菜单；部分 GPU 界面和弹窗不兼容。",0,24,350,650,46,923));
+        pages[3].push_back(control(L"STATIC",L"默认自动补偿系统缩放，并匹配电视内容区比例；独立于桌面分辨率。\n网页长内容仍可滚动。Ctrl+滚轮缩放电视，Shift+右键打开菜单。",0,24,350,650,46,923));
         status=control(L"STATIC",L"",0,24,400,650,40,900);
         control(L"BUTTON",L"关闭",BS_DEFPUSHBUTTON|WS_TABSTOP,584,450,96,28,IDCANCEL);
         pages[0].push_back(control(L"BUTTON",L"导入表情图片…",BS_PUSHBUTTON|WS_TABSTOP,24,450,180,28,901));

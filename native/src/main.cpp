@@ -106,7 +106,7 @@ struct Settings {
     bool topmost = true, clickThrough = false, autoHide = true, economy = true;
     bool floating = false;
     bool hd = false;
-    int appMode=0,appFps=15,shortcutTarget=0,appResolution=0;
+    int appMode=0,appFps=15,shortcutTarget=0,appResolution=3;
     int layerMode=0;
     DWORD layerPid=0;
     std::wstring layerPath;
@@ -361,7 +361,8 @@ public:
         settings.layerMode=std::clamp(get(L"layerMode",0),0,1);
         settings.appMode=std::clamp(get(L"appMode",0),0,1);settings.appFps=std::clamp(get(L"appFps",15),5,30);
         settings.shortcutTarget=std::clamp(get(L"shortcutTarget",0),0,1);
-        settings.appResolution=std::clamp(get(L"appResolution",0),0,2);
+        settings.appResolution=std::clamp(get(L"appResolution",3),0,3);
+        if(get(L"appCanvasVersion",0)<1 && settings.appResolution==0)settings.appResolution=3;
         wchar_t layerPath[32768]{};GetPrivateProfileStringW(L"PICO",L"layerPath",L"",layerPath,32768,configPath.c_str());settings.layerPath=layerPath;
         wchar_t layerPid[16]{};GetPrivateProfileStringW(L"PICO",L"layerPid",L"0",layerPid,16,configPath.c_str());
         wchar_t* layerPidEnd=nullptr;const auto parsedLayerPid=wcstoull(layerPid,&layerPidEnd,10);
@@ -401,6 +402,7 @@ public:
         put(L"material",settings.material);put(L"appMode",settings.appMode);put(L"appFps",settings.appFps);
         put(L"shortcutTarget",settings.shortcutTarget);
         put(L"appResolution",settings.appResolution);
+        put(L"appCanvasVersion",1);
         settings.yaw=static_cast<int>(std::lround(baseYaw*1000));settings.pitch=static_cast<int>(std::lround(basePitch*1000));settings.pauseAnimation=paused;
         put(L"yaw",settings.yaw);put(L"pitch",settings.pitch);put(L"paused",paused);
         put(L"motionAmplitude",settings.motionAmplitude);put(L"throwGain",settings.throwGain);put(L"rotationSensitivity",settings.rotationSensitivity);

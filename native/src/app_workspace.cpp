@@ -19,8 +19,11 @@
 namespace appworkspace {
 namespace {
 constexpr int Width=800,Height=456,Bar=44;
-constexpr int SourceWidth=1600,SourceHeight=1100;
-SIZE canvas(int resolution){return resolution==2?SIZE{1600,900}:resolution==1?SIZE{1280,720}:SIZE{Width,Height};}
+constexpr int SourceWidth=2048,SourceHeight=1400;
+SIZE canvas(int resolution,UINT dpi=96){
+    const int width=resolution==3?std::clamp(MulDiv(1024,static_cast<int>(dpi?dpi:96),96),1280,1920):resolution==2?1600:resolution==1?1280:Width;
+    return {width,MulDiv(width,Height,Width)};
+}
 constexpr UINT Attach=WM_APP+30,Configure=WM_APP+31,Release=WM_APP+32,Pointer=WM_APP+33,Keyboard=WM_APP+34,Paused=WM_APP+35,Cycle=WM_APP+36,Immersive=WM_APP+37;
 struct Shared {
     DWORD parent=0;HWND owner=nullptr,host=nullptr;
@@ -92,13 +95,14 @@ struct Capture {
             while(!shared->stop){
                 const auto began=GetTickCount64();
                 if(!shared->paused){
-                    const auto size=canvas(shared->resolution);const bool immersive=shared->immersive;
+                    const auto size=canvas(shared->resolution,GetDpiForWindow(shared->window));const bool immersive=shared->immersive;
                     std::fill_n(pixels,Width*Height,0xff16202au);
                     if(!immersive){RECT area{0,0,size.cx,size.cy};HBRUSH background=CreateSolidBrush(RGB(22,32,42));FillRect(sourceDC,&area,background);DeleteObject(background);}
                     std::vector<HWND> children;for(HWND child=GetWindow(shared->window,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT))if(IsWindowVisible(child)){children.push_back(child);if(shared->single || shared->immersive)break;}
                     for(auto it=children.rbegin();it!=children.rend() && !shared->stop;++it){RECT rect{};GetWindowRect(*it,&rect);MapWindowPoints(nullptr,shared->window,reinterpret_cast<POINT*>(&rect),2);
                         if(immersive){DWORD_PTR result=0;if(SendMessageTimeoutW(*it,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,40,&result)){
-                            std::fill_n(static_cast<uint32_t*>(sourcePixels),SourceWidth*SourceHeight,0xff16202au);if(PrintWindow(*it,sourceDC,2)){RECT source=contentRect(*it);RECT limit{0,0,SourceWidth,SourceHeight};if(IntersectRect(&source,&source,&limit)){SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,0,0,Width,Height,sourceDC,source.left,source.top,source.right-source.left,source.bottom-source.top,SRCCOPY);}}}
+                            RECT area{0,0,std::min<LONG>(rect.right-rect.left,SourceWidth),std::min<LONG>(rect.bottom-rect.top,SourceHeight)};HBRUSH background=CreateSolidBrush(RGB(22,32,42));FillRect(sourceDC,&area,background);DeleteObject(background);
+                            if(PrintWindow(*it,sourceDC,2)){RECT source=contentRect(*it);RECT limit{0,0,SourceWidth,SourceHeight};if(IntersectRect(&source,&source,&limit)){SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,0,0,Width,Height,sourceDC,source.left,source.top,source.right-source.left,source.bottom-source.top,SRCCOPY);}}}
                             continue;}
                         const int saved=SaveDC(sourceDC);IntersectClipRect(sourceDC,rect.left,rect.top,rect.right,rect.bottom);SetViewportOrgEx(sourceDC,rect.left,rect.top,nullptr);
                         DWORD_PTR result=0;if(SendMessageTimeoutW(*it,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,40,&result))PrintWindow(*it,sourceDC,2);
@@ -132,16 +136,27 @@ struct Host {
         SetWindowPlacement(e.window,&e.placement);ShowWindow(e.window,(e.style&WS_VISIBLE)?(e.placement.showCmd==SW_SHOWMINIMIZED?SW_SHOWMINIMIZED:SW_SHOWNOACTIVATE):SW_HIDE);
     }
     void release(){capture.stop();for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
+    SIZE windowSize(HWND target)const{
+        SIZE size{width,height};
+        if(immersive && chromium(target)){
+            RECT outer{};GetWindowRect(target,&outer);const RECT content=contentRect(target);
+            size.cx+=std::clamp<LONG>(outer.right-outer.left-(content.right-content.left),0,SourceWidth-width);
+            size.cy+=std::clamp<LONG>(outer.bottom-outer.top-(content.bottom-content.top),0,SourceHeight-height);
+        }
+        return size;
+    }
     void layout(){
         capture.single(mode==0);
-        const auto size=canvas(resolution);width=size.cx;height=size.cy;capture.resolution(resolution);
+        const auto size=canvas(resolution,GetDpiForWindow(window));width=size.cx;height=size.cy;capture.resolution(resolution);
         const bool browser=immersive && std::any_of(entries.begin(),entries.end(),[](const Entry& e){return chromium(e.window);});
-        SetWindowPos(window,nullptr,GetSystemMetrics(SM_XVIRTUALSCREEN)-width-32,GetSystemMetrics(SM_YVIRTUALSCREEN),width,height+(browser?140:0),SWP_NOZORDER|SWP_NOACTIVATE);
+        const int hostWidth=browser?SourceWidth:width,hostHeight=browser?SourceHeight:height;
+        SetWindowPos(window,nullptr,GetSystemMetrics(SM_XVIRTUALSCREEN)-hostWidth-32,GetSystemMetrics(SM_YVIRTUALSCREEN),hostWidth,hostHeight,SWP_NOZORDER|SWP_NOACTIVATE);
         for(size_t i=0;i<entries.size();++i){auto& e=entries[i];if(!IsWindow(e.window))continue;
             const bool single=mode==0 || immersive;const LONG_PTR style=(e.style&~(WS_POPUP|WS_MINIMIZE|WS_MAXIMIZE))|WS_CHILD;
             SetWindowLongPtrW(e.window,GWL_STYLE,single?style&~(WS_CAPTION|WS_THICKFRAME):style);
             const int offset=static_cast<int>(i%5)*24;
-            SetWindowPos(e.window,nullptr,single?0:offset,single?0:offset,single?width:width-100,single?height+(immersive && chromium(e.window)?140:0):height-100,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED|SWP_SHOWWINDOW);
+            const auto desired=windowSize(e.window);
+            SetWindowPos(e.window,nullptr,single?0:offset,single?0:offset,single?desired.cx:width-100,single?desired.cy:height-100,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED|SWP_SHOWWINDOW);
         }
         status(entries.empty()?L"点击“打开”自动启动并接入；“接入”用于已打开的窗口。\n兼容模式：传统 Win32 应用优先；GPU 界面可能黑屏。":mode==0?L"单应用铺满 · 原窗口退出时恢复":L"多窗口桌面 · 最大化限制在容器内");
     }
@@ -188,8 +203,9 @@ struct Host {
             entries.erase(std::remove_if(entries.begin(),entries.end(),[](const Entry& e){DWORD pid=0;GetWindowThreadProcessId(e.window,&pid);return !IsWindow(e.window)||pid!=e.pid;}),entries.end());
             for(auto& e:entries){RECT rect{};GetWindowRect(e.window,&rect);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&rect),2);
                 if(GetParent(e.window)!=window){SetWindowLongPtrW(e.window,GWL_STYLE,(GetWindowLongPtrW(e.window,GWL_STYLE)&~WS_POPUP)|WS_CHILD);SetParent(e.window,window);}
-                const int limitHeight=height+(immersive && chromium(e.window)?140:0);
-                if(rect.left<0 || rect.top<0 || rect.right>width || rect.bottom>limitHeight){const int w=std::clamp<int>(rect.right-rect.left,1,width),h=std::clamp<int>(rect.bottom-rect.top,1,limitHeight);SetWindowPos(e.window,nullptr,std::clamp<int>(rect.left,0,width-w),std::clamp<int>(rect.top,0,limitHeight-h),w,h,SWP_NOACTIVATE|SWP_NOZORDER);}
+                const auto desired=windowSize(e.window);const int limitWidth=desired.cx,limitHeight=desired.cy;
+                if((mode==0 || immersive) && (rect.left!=0 || rect.top!=0 || rect.right!=limitWidth || rect.bottom!=limitHeight))SetWindowPos(e.window,nullptr,0,0,limitWidth,limitHeight,SWP_NOACTIVATE|SWP_NOZORDER);
+                else if(rect.left<0 || rect.top<0 || rect.right>limitWidth || rect.bottom>limitHeight){const int w=std::clamp<int>(rect.right-rect.left,1,limitWidth),h=std::clamp<int>(rect.bottom-rect.top,1,limitHeight);SetWindowPos(e.window,nullptr,std::clamp<int>(rect.left,0,limitWidth-w),std::clamp<int>(rect.top,0,limitHeight-h),w,h,SWP_NOACTIVATE|SWP_NOZORDER);}
             }
             if(link.lock()){link.data->count=static_cast<LONG>(entries.size());link.unlock();}
         }
@@ -202,7 +218,7 @@ struct Host {
         switch(m){
         case WM_TIMER:self->tick();return 0;
         case Attach:self->attach(reinterpret_cast<HWND>(l));return 0;
-        case Configure:self->mode=LOWORD(w);self->resolution=std::clamp<int>(HIWORD(w),0,2);self->fps=std::clamp(static_cast<int>(l),5,30);SetTimer(h,1,1000/self->fps,nullptr);self->capture.rate(self->fps);self->layout();return 0;
+        case Configure:self->mode=LOWORD(w);self->resolution=std::clamp<int>(HIWORD(w),0,3);self->fps=std::clamp(static_cast<int>(l),5,30);SetTimer(h,1,1000/self->fps,nullptr);self->capture.rate(self->fps);self->layout();return 0;
         case Release:if(!self->entries.empty()){self->restore(self->entries.back());self->entries.pop_back();self->focus=self->entries.empty()?nullptr:self->entries.back().window;self->layout();}return 0;
         case Pointer:self->pointer(LOWORD(w),HIWORD(w),{GET_X_LPARAM(l),GET_Y_LPARAM(l)});return 0;
         case Immersive:self->immersive=!self->immersive;self->capture.immersive(self->immersive);self->layout();return 0;
@@ -259,13 +275,13 @@ void Workspace::open(HWND owner,int mode,int fps,int resolution){
     auto link=std::make_unique<Link>();const auto name=L"Local\\PicoPet.App."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(GetTickCount64());
     if(!link->connect(name,true))throw std::runtime_error("Create application frame channel");
     ZeroMemory(link->data,sizeof(Shared));link->data->parent=GetCurrentProcessId();link->data->owner=owner;link->data->mode=mode;link->data->fps=fps;
-    link->data->resolution=std::clamp(resolution,0,2);
+    link->data->resolution=std::clamp(resolution,0,3);
     wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);std::wstring command=L"\""+std::wstring(executable)+L"\" --app-host \""+name+L"\"";
     STARTUPINFOW startup{sizeof(startup)};startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;PROCESS_INFORMATION process{};
     if(!CreateProcessW(executable,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process))throw std::runtime_error("Start application host");
     CloseHandle(process.hThread);impl->process=process.hProcess;impl->link=std::move(link);
 }
-void Workspace::configure(int mode,int fps,int resolution){impl->mode=mode;impl->fps=fps;if(host())PostMessageW(host(),Configure,MAKELONG(mode,std::clamp(resolution,0,2)),fps);impl->dirty=true;}
+void Workspace::configure(int mode,int fps,int resolution){impl->mode=mode;impl->fps=fps;if(host())PostMessageW(host(),Configure,MAKELONG(mode,std::clamp(resolution,0,3)),fps);impl->dirty=true;}
 bool Workspace::attach(HWND window){return host() && PostMessageW(host(),Attach,0,reinterpret_cast<LPARAM>(window));}
 void Workspace::fullscreen(){impl->immersive=!impl->immersive;if(host())PostMessageW(host(),Immersive,0,0);impl->dirty=true;}
 void Workspace::next(){if(host())PostMessageW(host(),Cycle,0,0);}

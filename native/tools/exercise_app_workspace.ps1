@@ -5,6 +5,11 @@ Add-Type @'
 using System;using System.Runtime.InteropServices;using System.Text;
 public static class AppCheck {
  [DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode)]public static extern bool WritePrivateProfileString(string section,string key,string value,string path);
+ [DllImport("user32.dll")]public static extern uint GetDpiForWindow(IntPtr h);
+ [StructLayout(LayoutKind.Sequential)]public struct RECT{public int Left,Top,Right,Bottom;}
+ [DllImport("user32.dll")]static extern bool GetWindowRect(IntPtr h,out RECT r);
+ public static RECT Content(IntPtr window){var rect=new RECT();EnumChildWindows(window,(h,p)=>{var c=new StringBuilder(128);GetClassName(h,c,128);if(c.ToString()=="Chrome_RenderWidgetHostHWND"){GetWindowRect(h,out rect);return false;}return true;},IntPtr.Zero);return rect;}
  [DllImport("user32.dll")]static extern bool EnumChildWindows(IntPtr h,EnumProc e,IntPtr p);
  [DllImport("user32.dll")]static extern int GetDlgCtrlID(IntPtr h);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]static extern int GetClassName(IntPtr h,StringBuilder s,int n);
@@ -49,6 +54,7 @@ $restart=Join-Path $env:LOCALAPPDATA 'Programs/PicoPet/PicoPet.exe'
 Copy-Item -LiteralPath $config -Destination $backup -Force
 $pet=[IntPtr]::Zero;$app=$null;$second=$null;$appWindow=[IntPtr]::Zero
 try {
+ [void][AppCheck]::WritePrivateProfileString('PICO','appResolution','0',$config);[void][AppCheck]::WritePrivateProfileString('PICO','appCanvasVersion','1',$config)
  Start-Process -FilePath (Join-Path $root 'dist/PicoPet.exe') -WindowStyle Hidden
  Await {$script:pet=[EmbeddedWin]::FindWindow('PicoPet.Win11.Native','PICO');$pet -ne [IntPtr]::Zero} 'Pet did not start'
  if((Send $pet 0x8003 2) -band 4){[void](Send $pet 0x111 101)}
@@ -101,7 +107,7 @@ try {
  ClickScreen 140 205
  Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Clicked'} 'Projected button click did not reach the app'
  $expected='TV_INPUT_OK'
- foreach($resolution in @(@(1,1280,720),@(2,1600,900))){
+ foreach($resolution in @(@(1,1280,730),@(2,1600,912))){
   [void][EmbeddedWin]::SendMessage($hostWindow,0x801f,[IntPtr]($resolution[0] -shl 16),[IntPtr]15)
   $bounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$bounds)
   if($bounds.Right-$bounds.Left -ne $resolution[1] -or $bounds.Bottom-$bounds.Top -ne $resolution[2]){throw 'Independent application resolution was not applied'}
@@ -148,6 +154,7 @@ try {
   $browserWindow=[IntPtr]::Zero
   try{
    [IO.File]::WriteAllText($shortcutStore,"[Shortcuts]`r`ncount=1`r`nitem0=$browserPath`r`n",[Text.Encoding]::Unicode)
+   [void][AppCheck]::WritePrivateProfileString('PICO','appResolution','3',$config)
    Start-Process -FilePath (Join-Path $root 'dist/PicoPet.exe') -WindowStyle Hidden
    Await {$script:pet=[EmbeddedWin]::FindWindow('PicoPet.Win11.Native','PICO');$pet -ne [IntPtr]::Zero} 'Pet restart failed'
    [void](Send $pet 0x111 210);[void](Send $pet 0x111 250);[void](Send $pet 0x111 106);[void](Send $pet 0x111 324)
@@ -163,16 +170,27 @@ try {
    if($browserWindow -eq [IntPtr]::Zero -or $existing -contains $browserWindow){throw 'Browser did not create a separate TV window'}
    foreach($old in $existing){if([AppCheck]::GetParent($old) -ne [IntPtr]::Zero){throw 'Existing user browser window was unexpectedly attached'}}
    Await {(Send $pet 0x8003 83) -gt 3} 'Browser capture missing'
+   $autoWidth=[Math]::Min(1920,[Math]::Max(1280,[int][Math]::Round(1024*[AppCheck]::GetDpiForWindow($hostWindow)/96)))
+   $autoHeight=[int][Math]::Round($autoWidth*456/800)
+   $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($browserWindow,[ref]$r)
+   if($r.Right-$r.Left -ne $autoWidth -or $r.Bottom-$r.Top -ne $autoHeight){throw 'Automatic browser canvas did not compensate for DPI'}
+   Start-Sleep -Milliseconds 700
+   $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r)
+   $bitmap=New-Object Drawing.Bitmap ($r.Right-$r.Left),($r.Bottom-$r.Top);$graphics=[Drawing.Graphics]::FromImage($bitmap)
+   try{$graphics.CopyFromScreen($r.Left,$r.Top,0,0,$bitmap.Size);$bitmap.Save((Join-Path $root 'output/browser-auto-fit.png'))}finally{$graphics.Dispose();$bitmap.Dispose()}
+   [void](Send $pet 0x111 328)
+   Await {$c=[AppCheck]::Content($browserWindow);[Math]::Abs(($c.Right-$c.Left)-$autoWidth) -le 2 -and [Math]::Abs(($c.Bottom-$c.Top)-$autoHeight) -le 2} 'Fullscreen browser viewport does not match TV aspect and resolution'
+   [void](Send $pet 0x111 328)
    [void](Send $pet 0x111 300)
    Await {$script:prefs=[EmbeddedWin]::FindWindow('PicoPet.Preferences','PICO · 偏好设置');$prefs -ne [IntPtr]::Zero} 'Preferences missing'
-   foreach($resolution in @(@(1,1280,720),@(2,1600,900))){
-    [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1020)) 0x14e $resolution[0]);[void](Send $prefs 0x111 (1020 -bor (1 -shl 16)))
+   foreach($resolution in @(@(1,1280,730),@(2,1600,912))){
+    [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1020)) 0x14e ($resolution[0]+1));[void](Send $prefs 0x111 (1020 -bor (1 -shl 16)))
     Await {$r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($browserWindow,[ref]$r);($r.Right-$r.Left -eq $resolution[1]) -and ($r.Bottom-$r.Top -eq $resolution[2])} 'Browser resolution did not update from settings'
    }
    [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1019)) 0x14e 1);[void](Send $prefs 0x111 (1019 -bor (1 -shl 16)))
    if(!((Get-Content -LiteralPath $config) -contains 'shortcutTarget=1') -or !((Get-Content -LiteralPath $config) -contains 'appResolution=2')){throw 'Application preferences were not persisted'}
    [void](Send $prefs 0x10)
-   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;processId=[AppCheck]::ProcessId($browserWindow)} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
+   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;processId=[AppCheck]::ProcessId($browserWindow)} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
    Get-Content (Join-Path $root 'output/browser-workspace-checks.json')
   }finally{
    if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}
