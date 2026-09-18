@@ -6,6 +6,7 @@
 
 namespace appworkspace {
 inline constexpr UINT Open=320,Choose=321,Launch=322,Return=323,Single=324,Desktop=325,Detach=326,Next=327,Fullscreen=328;
+inline constexpr UINT FrameReady=WM_APP+20;
 // The helper owns the host window and restores foreign windows if the pet exits.
 int runHost(const wchar_t* mappingName);
 class Workspace {

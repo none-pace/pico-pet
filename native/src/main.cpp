@@ -106,7 +106,7 @@ struct Settings {
     bool topmost = true, clickThrough = false, autoHide = true, economy = true;
     bool floating = false;
     bool hd = false;
-    int appMode=0,appFps=15,shortcutTarget=0,appResolution=3;
+    int appMode=0,appFps=60,shortcutTarget=0,appResolution=3;
     int layerMode=0;
     DWORD layerPid=0;
     std::wstring layerPath;
@@ -359,7 +359,8 @@ public:
         settings.x = get(L"x", INT_MIN); settings.y = get(L"y", INT_MIN);
         settings.topmost = get(L"topmost", 1) != 0;
         settings.layerMode=std::clamp(get(L"layerMode",0),0,1);
-        settings.appMode=std::clamp(get(L"appMode",0),0,1);settings.appFps=std::clamp(get(L"appFps",15),5,30);
+        settings.appMode=std::clamp(get(L"appMode",0),0,1);settings.appFps=std::clamp(get(L"appFps",60),5,60);
+        if(get(L"appFrameVersion",0)<1 && settings.appFps==15)settings.appFps=60;
         settings.shortcutTarget=std::clamp(get(L"shortcutTarget",0),0,1);
         settings.appResolution=std::clamp(get(L"appResolution",3),0,3);
         if(get(L"appCanvasVersion",0)<1 && settings.appResolution==0)settings.appResolution=3;
@@ -403,6 +404,7 @@ public:
         put(L"shortcutTarget",settings.shortcutTarget);
         put(L"appResolution",settings.appResolution);
         put(L"appCanvasVersion",1);
+        put(L"appFrameVersion",1);
         settings.yaw=static_cast<int>(std::lround(baseYaw*1000));settings.pitch=static_cast<int>(std::lround(basePitch*1000));settings.pauseAnimation=paused;
         put(L"yaw",settings.yaw);put(L"pitch",settings.pitch);put(L"paused",paused);
         put(L"motionAmplitude",settings.motionAmplitude);put(L"throwGain",settings.throwGain);put(L"rotationSensitivity",settings.rotationSensitivity);
@@ -958,7 +960,7 @@ public:
         if(workspace.active())return;
         if(embeddedConsole.visible())embeddedConsole.hide();
         stopAnimation();stopMotion();stopPose();workspace.open(hwnd,settings.appMode,settings.appFps,settings.appResolution);
-        SetTimer(hwnd,9,33,nullptr);terminalDirty=true;renderedFace=-1;updateStyles();SetForegroundWindow(hwnd);SetFocus(hwnd);render(ComputerDiagnostics,0);
+        SetTimer(hwnd,9,100,nullptr);terminalDirty=true;renderedFace=-1;updateStyles();render(ComputerDiagnostics,0);
     }
     void closeWorkspace(){
         workspace.close();KillTimer(hwnd,9);appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();terminalDirty=true;renderedFace=-1;updateStyles();applyPolicy();
@@ -969,13 +971,13 @@ public:
     bool workspaceMouse(UINT message,WPARAM buttons,LPARAM coordinates){
         if(!workspace.active() || dragging)return false;
         POINT point{GET_X_LPARAM(coordinates),GET_Y_LPARAM(coordinates)};
-        if(message==WM_MOUSEWHEEL){if(GetKeyState(VK_CONTROL)&0x8000)return false;ScreenToClient(hwnd,&point);}
+        if(message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL)ScreenToClient(hwnd,&point);
         if((GetKeyState(VK_MENU)&0x8000) && message==WM_LBUTTONDOWN)return false;
         bool hit=false;POINT mapped{};
         if(model.ready()){const auto pick=model.pick(point.x,point.y,extent);hit=pick.kind==1;mapped={static_cast<LONG>(pick.u*800),static_cast<LONG>(pick.v*500)};}
         else if(screenHit(point,renderedPose)){const int source=pixelMapping.sourceIndex(point.x,point.y);const auto& area=layoutFor(renderedPose);mapped={MulDiv(source%spriteSize()-area.x,800,area.width),MulDiv(source/spriteSize()-area.y,500,area.height)};hit=true;}
         if(!hit && !appPointerDown)return false;if(hit)lastAppPoint=mapped;else mapped=lastAppPoint;
-        if(message==WM_LBUTTONDOWN){appPointerDown=true;SetCapture(hwnd);SetForegroundWindow(hwnd);SetFocus(hwnd);}
+        if(message==WM_LBUTTONDOWN)appPointerDown=true;
         workspace.mouse(message,buttons,mapped.x,mapped.y);
         if(message==WM_LBUTTONUP){appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();}return true;
     }
@@ -1255,7 +1257,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     try {
         if(pet->taskbarCreated && message==pet->taskbarCreated) { pet->addTray(); return 0; }
         switch(message) {
-        case WM_MOUSEACTIVATE: return (pet->workspace.active() || pet->embeddedConsole.visible())?MA_ACTIVATE:MA_NOACTIVATE;
+        case WM_MOUSEACTIVATE: return pet->embeddedConsole.visible()?MA_ACTIVATE:MA_NOACTIVATE;
         case WM_SETCURSOR:
             if(LOWORD(lp)==HTCLIENT && pet->embeddedConsole.visible()){
                 POINT point{};GetCursorPos(&point);ScreenToClient(hwnd,&point);SetCursor(LoadCursorW(nullptr,pet->screenHit(point,pet->renderedPose)?IDC_IBEAM:IDC_ARROW));return TRUE;
@@ -1280,6 +1282,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         case WM_MBUTTONDOWN: pet->beginDrag(true);return 0;
         case WM_MBUTTONUP: pet->endDrag();return 0;
         case WM_MOUSEWHEEL: if(pet->workspaceMouse(message,wp,lp))return 0;pet->zoomWheel(GET_WHEEL_DELTA_WPARAM(wp));return 0;
+        case WM_MOUSEHWHEEL:if(pet->workspaceMouse(message,wp,lp))return 0;break;
         case WM_MOUSEMOVE: if(pet->workspaceMouse(message,wp,lp))return 0;pet->mouseMove();return 0;
         case WM_MOUSELEAVE: pet->trackingMouse=false;pet->updateHover();return 0;
         case WM_LBUTTONUP: if(pet->workspaceMouse(message,wp,lp))return 0;pet->endDrag();return 0;
@@ -1336,6 +1339,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             }
             break;
         case kRenderReadyMessage: pet->renderReady();return 0;
+        case appworkspace::FrameReady:pet->workspaceTick();return 0;
         case kLayerMessage:
             if(!pet->layerUpdatePending){pet->layerUpdatePending=SetTimer(hwnd,kLayerTimer,80,nullptr)!=0;if(!pet->layerUpdatePending)pet->refreshLayer();}return 0;
         case WM_COMMAND: pet->command(LOWORD(wp));return 0;

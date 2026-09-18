@@ -11,14 +11,14 @@
 #include <filesystem>
 #include <cstring>
 #include <thread>
-#include <mutex>
 #include <atomic>
+#include <chrono>
 #include "window_layer.h"
 
 
 namespace appworkspace {
 namespace {
-constexpr int Width=800,Height=456,Bar=44;
+constexpr int Width=800,Height=500;
 constexpr int SourceWidth=2048,SourceHeight=1400;
 SIZE canvas(int resolution,UINT dpi=96){
     const int width=resolution==3?std::clamp(MulDiv(1024,static_cast<int>(dpi?dpi:96),96),1280,1920):resolution==2?1600:resolution==1?1280:Width;
@@ -27,7 +27,7 @@ SIZE canvas(int resolution,UINT dpi=96){
 constexpr UINT Attach=WM_APP+30,Configure=WM_APP+31,Release=WM_APP+32,Pointer=WM_APP+33,Keyboard=WM_APP+34,Paused=WM_APP+35,Cycle=WM_APP+36,Immersive=WM_APP+37;
 struct Shared {
     DWORD parent=0;HWND owner=nullptr,host=nullptr;
-    LONG generation=0,count=0,mode=0,fps=15,closing=0,resolution=0;
+    LONG generation=0,count=0,mode=0,fps=60,closing=0,resolution=0,framePending=0;
     wchar_t status[256]{};
     std::array<uint32_t,Width*Height> pixels{};
 };
@@ -70,19 +70,22 @@ RECT contentRect(HWND window){
 }
 struct Capture {
     struct State {
-        HWND window=nullptr;std::atomic_bool stop=false,paused=false;std::atomic_int fps=15,resolution=0;std::atomic_bool single=true,immersive=false;
-        std::mutex mutex;std::array<uint32_t,Width*Height> frame{};bool fresh=false;
+        HWND window=nullptr;std::atomic_bool stop=false,paused=false;std::atomic_int fps=60,resolution=0;std::atomic_bool single=true,immersive=false;
+        std::shared_ptr<Link> link;HANDLE wake=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        ~State(){if(wake)CloseHandle(wake);}
     };
     std::shared_ptr<State> state;
-    void stop(){if(state)state->stop=true;state.reset();}
+    void stop(){if(state){state->stop=true;SetEvent(state->wake);}state.reset();}
     ~Capture(){stop();}
-    void pause(bool value){if(state)state->paused=value;}
-    void rate(int fps){if(state)state->fps=std::clamp(fps,5,30);}
+    void wake(){if(state)SetEvent(state->wake);}
+    void pause(bool value){if(state){state->paused=value;wake();}}
+    void rate(int fps){if(state){state->fps=std::clamp(fps,5,60);wake();}}
     void immersive(bool value){if(state)state->immersive=value;}
     void single(bool value){if(state)state->single=value;}
     void resolution(int value){if(state)state->resolution=value;}
-    void start(HWND window){
-        stop();state=std::make_shared<State>();state->window=window;
+    void start(HWND window,const std::wstring& mapping){
+        stop();state=std::make_shared<State>();state->window=window;state->link=std::make_shared<Link>();
+        if(!state->wake || !state->link->connect(mapping,false))throw std::runtime_error("Connect application capture channel");
         // A foreign window can block PrintWindow indefinitely. Only this independent
         // capture thread calls it; the host continues restoring windows and exiting.
         std::thread([shared=state]{
@@ -92,8 +95,11 @@ struct Capture {
             const auto previous=SelectObject(dc,bitmap);
             HDC sourceDC=CreateCompatibleDC(dc);BITMAPINFO sourceInfo=info;sourceInfo.bmiHeader.biWidth=SourceWidth;sourceInfo.bmiHeader.biHeight=-SourceHeight;void* sourcePixels=nullptr;HBITMAP sourceBitmap=CreateDIBSection(sourceDC,&sourceInfo,DIB_RGB_COLORS,&sourcePixels,nullptr,0);const auto sourcePrevious=SelectObject(sourceDC,sourceBitmap);
             if(!sourceDC || !sourceBitmap){SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);if(sourceBitmap)DeleteObject(sourceBitmap);if(sourceDC)DeleteDC(sourceDC);return;}
+            HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
+            if(!timer)timer=CreateWaitableTimerW(nullptr,FALSE,nullptr);
+            auto changedAt=std::chrono::steady_clock::now();
             while(!shared->stop){
-                const auto began=GetTickCount64();
+                const auto began=std::chrono::steady_clock::now();
                 if(!shared->paused){
                     const auto size=canvas(shared->resolution,GetDpiForWindow(shared->window));const bool immersive=shared->immersive;
                     std::fill_n(pixels,Width*Height,0xff16202au);
@@ -110,23 +116,31 @@ struct Capture {
                     }
                     if(!immersive){SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,0,0,Width,Height,sourceDC,0,0,size.cx,size.cy,SRCCOPY);}
                     GdiFlush();for(int i=0;i<Width*Height;++i)pixels[i]|=0xff000000u;
-                    {std::lock_guard lock(shared->mutex);if(std::memcmp(shared->frame.data(),pixels,Width*Height*4)){std::memcpy(shared->frame.data(),pixels,Width*Height*4);shared->fresh=true;}}
+                    auto& link=*shared->link;
+                    if(link.lock()){
+                        if(std::memcmp(link.data->pixels.data(),pixels,Width*Height*4)){
+                            std::memcpy(link.data->pixels.data(),pixels,Width*Height*4);++link.data->generation;changedAt=began;
+                            if(!InterlockedExchange(&link.data->framePending,1) && !PostMessageW(link.data->owner,FrameReady,0,0))InterlockedExchange(&link.data->framePending,0);
+                        }
+                        link.unlock();
+                    }
                 }
-                const auto spent=GetTickCount64()-began;const DWORD interval=static_cast<DWORD>(1000/shared->fps.load());Sleep(spent<interval?interval-static_cast<DWORD>(spent):1);
+                const int rate=began-changedAt>std::chrono::milliseconds(500)?std::min(10,shared->fps.load()):shared->fps.load();
+                const auto remaining=std::chrono::nanoseconds(1000000000/rate)-(std::chrono::steady_clock::now()-began);
+                if(shared->paused){WaitForSingleObject(shared->wake,250);changedAt=std::chrono::steady_clock::now();}
+                else if(timer && remaining.count()>0){LARGE_INTEGER due{};due.QuadPart=-std::max<LONGLONG>(1,remaining.count()/100);SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE);HANDLE waits[]={shared->wake,timer};if(WaitForMultipleObjects(2,waits,FALSE,250)==WAIT_OBJECT_0)changedAt=std::chrono::steady_clock::now();}
+                else {if(WaitForSingleObject(shared->wake,1)==WAIT_OBJECT_0)changedAt=std::chrono::steady_clock::now();}
             }
+            if(timer)CloseHandle(timer);
             SelectObject(sourceDC,sourcePrevious);DeleteObject(sourceBitmap);DeleteDC(sourceDC);SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);
         }).detach();
-    }
-    void tick(Link& link){
-        if(!state)return;std::unique_lock guard(state->mutex,std::try_to_lock);if(!guard.owns_lock() || !state->fresh)return;
-        if(link.lock()){link.data->pixels=state->frame;++link.data->generation;link.unlock();state->fresh=false;}
     }
 };
 struct Entry {HWND window=nullptr,parent=nullptr,owner=nullptr;DWORD pid=0;LONG_PTR style=0,exstyle=0;WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};RECT rect{};};
 struct Host {
-    Link link;Capture capture;HWND window=nullptr,focus=nullptr,drag=nullptr;HANDLE parent=nullptr;
+    Link link;Capture capture;HWND window=nullptr,focus=nullptr,drag=nullptr,pointerCapture=nullptr;HANDLE parent=nullptr;
     ~Host(){release();}
-    std::vector<Entry> entries;bool immersive=false,paused=false;int mode=0,fps=15,resolution=0,width=Width,height=Height;POINT origin{};RECT dragRect{};ULONGLONG checked=0;
+    std::vector<Entry> entries;bool immersive=false,paused=false;int mode=0,fps=60,resolution=0,width=Width,height=Height;POINT origin{};RECT dragRect{};ULONGLONG checked=0;
     void status(const wchar_t* text){if(link.lock()){wcscpy_s(link.data->status,text);link.data->count=static_cast<LONG>(entries.size());++link.data->generation;link.unlock();}}
     void restore(Entry& e){
         DWORD pid=0;GetWindowThreadProcessId(e.window,&pid);if(!IsWindow(e.window) || pid!=e.pid)return;
@@ -135,7 +149,22 @@ struct Host {
         SetWindowPos(e.window,nullptr,e.rect.left,e.rect.top,e.rect.right-e.rect.left,e.rect.bottom-e.rect.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED);
         SetWindowPlacement(e.window,&e.placement);ShowWindow(e.window,(e.style&WS_VISIBLE)?(e.placement.showCmd==SW_SHOWMINIMIZED?SW_SHOWMINIMIZED:SW_SHOWNOACTIVATE):SW_HIDE);
     }
-    void release(){capture.stop();for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
+    void release(){capture.stop();pointerCapture=nullptr;for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
+    HWND application(HWND child)const{while(IsWindow(child) && GetParent(child)!=window)child=GetParent(child);return IsWindow(child) && GetParent(child)==window?child:nullptr;}
+    HWND keyboardTarget()const{
+        HWND root=application(focus);if(!root)return nullptr;
+        GUITHREADINFO info{sizeof(info)};const DWORD thread=GetWindowThreadProcessId(root,nullptr);
+        if(GetGUIThreadInfo(thread,&info) && (info.hwndFocus==root || IsChild(root,info.hwndFocus)))return info.hwndFocus;
+        return focus;
+    }
+    void activate(HWND target){
+        if(!application(target))return;focus=target;
+        const DWORD current=GetCurrentThreadId(),thread=GetWindowThreadProcessId(target,nullptr);
+        const bool joined=current!=thread && AttachThreadInput(current,thread,TRUE);
+        SetForegroundWindow(window);SetActiveWindow(window);SetFocus(target);
+        if(joined)AttachThreadInput(current,thread,FALSE);
+        capture.wake();
+    }
     SIZE windowSize(HWND target)const{
         SIZE size{width,height};
         if(immersive && chromium(target)){
@@ -158,7 +187,7 @@ struct Host {
             const auto desired=windowSize(e.window);
             SetWindowPos(e.window,nullptr,single?0:offset,single?0:offset,single?desired.cx:width-100,single?desired.cy:height-100,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED|SWP_SHOWWINDOW);
         }
-        status(entries.empty()?L"点击“打开”自动启动并接入；“接入”用于已打开的窗口。\n兼容模式：传统 Win32 应用优先；GPU 界面可能黑屏。":mode==0?L"单应用铺满 · 原窗口退出时恢复":L"多窗口桌面 · 最大化限制在容器内");
+        status(entries.empty()?L"从屏幕快捷方式启动应用，或在机身右键菜单中接入窗口。\n兼容模式：传统 Win32 应用优先；GPU 界面可能黑屏。":mode==0?L"单应用铺满 · 原窗口退出时恢复":L"多窗口桌面 · 最大化限制在容器内");
     }
     bool attach(HWND target){
         DWORD pid=0;GetWindowThreadProcessId(target,&pid);
@@ -182,20 +211,22 @@ struct Host {
         if(!immersive)point={MulDiv(point.x,width,Width),MulDiv(point.y,height,Height)};
         if(drag){
             if(message==WM_MOUSEMOVE){const int w=dragRect.right-dragRect.left,h=dragRect.bottom-dragRect.top;SetWindowPos(drag,nullptr,std::clamp<int>(dragRect.left+point.x-origin.x,0,std::max(0,width-w)),std::clamp<int>(dragRect.top+point.y-origin.y,0,std::max(0,height-h)),0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);}
-            if(message==WM_LBUTTONUP)drag=nullptr;return;
+            if(message==WM_LBUTTONUP){drag=nullptr;pointerCapture=nullptr;}return;
         }
         if(immersive){HWND top=GetWindow(window,GW_CHILD);if(top){const RECT area=contentRect(top);POINT clientOrigin{};ClientToScreen(top,&clientOrigin);RECT outer{};GetWindowRect(top,&outer);point={area.left+MulDiv(point.x,area.right-area.left,Width)+outer.left-clientOrigin.x,area.top+MulDiv(point.y,area.bottom-area.top,Height)+outer.top-clientOrigin.y};MapWindowPoints(top,window,&point,1);}}
-        HWND target=childAt(point);if(target==window)return;
+        HWND target=IsWindow(pointerCapture) && (message==WM_MOUSEMOVE || message==WM_LBUTTONUP)?pointerCapture:childAt(point);if(target==window)return;
         POINT screen=point;ClientToScreen(window,&screen);DWORD_PTR area=HTCLIENT;
-        SendMessageTimeoutW(target,WM_NCHITTEST,0,MAKELPARAM(screen.x,screen.y),SMTO_ABORTIFHUNG|SMTO_BLOCK,30,&area);
-        if(message==WM_LBUTTONDOWN){focus=target;HWND root=target;while(GetParent(root)!=window && GetParent(root))root=GetParent(root);SetWindowPos(root,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        if(message!=WM_MOUSEMOVE && message!=WM_MOUSEWHEEL && message!=WM_MOUSEHWHEEL)SendMessageTimeoutW(target,WM_NCHITTEST,0,MAKELPARAM(screen.x,screen.y),SMTO_ABORTIFHUNG|SMTO_BLOCK,30,&area);
+        if(message==WM_LBUTTONDOWN){pointerCapture=target;activate(target);HWND root=application(target);SetWindowPos(root,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
             if(area==HTCAPTION && mode==1 && !immersive){drag=root;origin=point;GetWindowRect(root,&dragRect);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&dragRect),2);return;}}
         if(area!=HTCLIENT && (message==WM_LBUTTONUP || message==WM_LBUTTONDBLCLK)){
             if(area==HTMAXBUTTON || (area==HTCAPTION && message==WM_LBUTTONDBLCLK)){SetWindowPos(target,nullptr,0,0,width,height,SWP_NOACTIVATE|SWP_NOZORDER);return;}
             if(area==HTCLOSE){PostMessageW(target,WM_CLOSE,0,0);return;}
         }
         POINT local=point;MapWindowPoints(window,target,&local,1);
-        PostMessageW(target,message,buttons,message==WM_MOUSEWHEEL?MAKELPARAM(screen.x,screen.y):MAKELPARAM(local.x,local.y));
+        PostMessageW(target,message,buttons,(message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL)?MAKELPARAM(screen.x,screen.y):MAKELPARAM(local.x,local.y));
+        if(message==WM_LBUTTONUP)pointerCapture=nullptr;
+        if(message!=WM_MOUSEMOVE)capture.wake();
     }
     void tick(){
         if(link.data->closing || WaitForSingleObject(parent,0)!=WAIT_TIMEOUT){DestroyWindow(window);return;}
@@ -209,7 +240,6 @@ struct Host {
             }
             if(link.lock()){link.data->count=static_cast<LONG>(entries.size());link.unlock();}
         }
-        if(!paused)try{capture.tick(link);}catch(const std::exception&){capture.stop();paused=true;status(L"窗口画面捕获失败，请返回后重新接入");}
     }
     static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
         auto* self=reinterpret_cast<Host*>(GetWindowLongPtrW(h,GWLP_USERDATA));
@@ -218,12 +248,12 @@ struct Host {
         switch(m){
         case WM_TIMER:self->tick();return 0;
         case Attach:self->attach(reinterpret_cast<HWND>(l));return 0;
-        case Configure:self->mode=LOWORD(w);self->resolution=std::clamp<int>(HIWORD(w),0,3);self->fps=std::clamp(static_cast<int>(l),5,30);SetTimer(h,1,1000/self->fps,nullptr);self->capture.rate(self->fps);self->layout();return 0;
+        case Configure:self->mode=LOWORD(w);self->resolution=std::clamp<int>(HIWORD(w),0,3);self->fps=std::clamp(static_cast<int>(l),5,60);self->capture.rate(self->fps);self->layout();return 0;
         case Release:if(!self->entries.empty()){self->restore(self->entries.back());self->entries.pop_back();self->focus=self->entries.empty()?nullptr:self->entries.back().window;self->layout();}return 0;
-        case Pointer:self->pointer(LOWORD(w),HIWORD(w),{GET_X_LPARAM(l),GET_Y_LPARAM(l)});return 0;
+        case Pointer:self->pointer(LOWORD(w),w>>16,{GET_X_LPARAM(l),GET_Y_LPARAM(l)});return 0;
         case Immersive:self->immersive=!self->immersive;self->capture.immersive(self->immersive);self->layout();return 0;
         case Cycle:if(self->entries.size()>1){std::rotate(self->entries.begin(),self->entries.begin()+1,self->entries.end());self->focus=self->entries.back().window;SetWindowPos(self->focus,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}return 0;
-        case Keyboard:if(IsWindow(self->focus)){const UINT msg=LOWORD(w);if(msg==WM_KEYDOWN && HIWORD(w)==VK_TAB){HWND root=self->focus;while(GetParent(root)!=self->window && GetParent(root))root=GetParent(root);if(HWND next=GetNextDlgTabItem(root,self->focus,FALSE))self->focus=next;}else PostMessageW(self->focus,msg,HIWORD(w),l);}return 0;
+        case Keyboard:if(HWND target=self->keyboardTarget()){PostMessageW(target,LOWORD(w),HIWORD(w),l);self->capture.wake();}return 0;
         case Paused:self->paused=w!=0;self->capture.pause(self->paused);return 0;
         case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -242,14 +272,14 @@ int runHost(const wchar_t* mappingName){
         host.parent=OpenProcess(SYNCHRONIZE,FALSE,host.link.data->parent);if(!host.parent)return 3;
         WNDCLASSW type{};type.hInstance=GetModuleHandleW(nullptr);type.lpfnWndProc=Host::proc;type.lpszClassName=L"PicoPet.ApplicationHost";type.hbrBackground=CreateSolidBrush(RGB(22,32,42));type.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&type);
         // Keep source windows outside the visible desktop; request bounded native paint snapshots.
-        HWND window=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,type.lpszClassName,L"PICO application workspace",WS_POPUP|WS_CLIPCHILDREN,GetSystemMetrics(SM_XVIRTUALSCREEN)-Width-32,GetSystemMetrics(SM_YVIRTUALSCREEN),Width,Height,nullptr,nullptr,type.hInstance,&host);
+        HWND window=CreateWindowExW(WS_EX_TOOLWINDOW,type.lpszClassName,L"PICO application workspace",WS_POPUP|WS_CLIPCHILDREN,GetSystemMetrics(SM_XVIRTUALSCREEN)-Width-32,GetSystemMetrics(SM_YVIRTUALSCREEN),Width,Height,nullptr,nullptr,type.hInstance,&host);
         if(!window){CloseHandle(host.parent);return 4;}
         const DWMNCRENDERINGPOLICY policy=DWMNCRP_DISABLED;DwmSetWindowAttribute(window,DWMWA_NCRENDERING_POLICY,&policy,sizeof(policy));
         ShowWindow(window,SW_SHOWNOACTIVATE);
-        host.capture.start(window);host.mode=host.link.data->mode;host.fps=host.link.data->fps;host.capture.rate(host.fps);host.capture.single(host.mode==0);
+        host.capture.start(window,mappingName);host.mode=host.link.data->mode;host.fps=host.link.data->fps;host.capture.rate(host.fps);host.capture.single(host.mode==0);
         host.resolution=host.link.data->resolution;host.layout();
         if(host.link.lock()){host.link.data->host=window;host.link.unlock();}
-        host.status(L"点击“打开”自动启动并接入；“接入”用于已打开的窗口。\n兼容模式：传统 Win32 应用优先；GPU 界面可能黑屏。");SetTimer(window,1,1000/std::clamp(host.fps,5,30),nullptr);
+        host.status(L"从屏幕快捷方式启动应用，或在机身右键菜单中接入窗口。\n兼容模式：传统 Win32 应用优先；GPU 界面可能黑屏。");SetTimer(window,1,250,nullptr);
         MSG message{};while(GetMessageW(&message,nullptr,0,0)>0){TranslateMessage(&message);DispatchMessageW(&message);}
         CloseHandle(host.parent);DeleteObject(type.hbrBackground);
     }catch(...){result=5;}
@@ -258,7 +288,7 @@ int runHost(const wchar_t* mappingName){
 
 struct Workspace::Impl {
     std::unique_ptr<Link> link;HANDLE process=nullptr;HWND owner=nullptr;bool immersive=false,paused=false,dirty=true;LONG generation=-1;
-    int mode=0,fps=15,windows=0;uint64_t frameCount=0;std::wstring message=L"正在启动应用容器…";
+    int mode=0,fps=60,windows=0;uint64_t frameCount=0;std::wstring message=L"正在启动应用容器…";
     DWORD launchedPid=0;ULONGLONG launchDeadline=0,launchChecked=0;std::vector<HWND> beforeLaunch;std::wstring browserPath;
     std::array<uint32_t,Width*Height> pixels{};HFONT font=nullptr;POINT pointer{};bool pointerDown=false;
     ~Impl(){if(font)DeleteObject(font);if(process)CloseHandle(process);}
@@ -320,10 +350,11 @@ void Workspace::close(){
 void Workspace::suspend(bool value){if(value==impl->paused)return;impl->paused=value;if(host())PostMessageW(host(),Paused,value,0);}
 void Workspace::tick(){
     if(!active())return;
+    InterlockedExchange(&impl->link->data->framePending,0);
     if(WaitForSingleObject(impl->process,0)==WAIT_OBJECT_0){if(impl->message!=L"应用容器已停止，请返回后重试"){impl->message=L"应用容器已停止，请返回后重试";impl->dirty=true;}return;}
     if(impl->launchDeadline && host() && GetTickCount64()-impl->launchChecked>=100){
         impl->launchChecked=GetTickCount64();
-        if(GetTickCount64()>impl->launchDeadline){impl->launchDeadline=0;impl->message=L"程序已启动，但未找到可确认的新窗口。请点“接入”选择。";impl->dirty=true;}
+        if(GetTickCount64()>impl->launchDeadline){impl->launchDeadline=0;impl->message=L"程序已启动，但未找到可确认的新窗口。请从机身右键菜单接入。";impl->dirty=true;}
         else if(impl->launchedPid || !impl->browserPath.empty()){struct Search{Impl* impl;HWND found=nullptr;} search{impl.get()};
             EnumWindows([](HWND h,LPARAM data)->BOOL{auto& search=*reinterpret_cast<Search*>(data);DWORD pid=0;GetWindowThreadProcessId(h,&pid);
                 if(!windowlayer::taskbarWindow(h) || std::find(search.impl->beforeLaunch.begin(),search.impl->beforeLaunch.end(),h)!=search.impl->beforeLaunch.end())return TRUE;
@@ -340,30 +371,21 @@ void Workspace::tick(){
 }
 bool Workspace::updated(){const bool dirty=impl->dirty;impl->dirty=false;return dirty;}
 void Workspace::draw(HDC dc,uint32_t* pixels){
-    std::fill_n(pixels,800*500,0xff16202au);std::copy(impl->pixels.begin(),impl->pixels.end(),pixels+Width*Bar);
+    std::copy(impl->pixels.begin(),impl->pixels.end(),pixels);
     if(!impl->font)impl->font=CreateFontW(-17,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
     const auto previous=SelectObject(dc,impl->font);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(219,238,231));
-    const wchar_t* labels[]={impl->mode==0?L"单应用":L"多窗口",L"接入",L"打开",L"切换",L"释放",L"返回",impl->immersive?L"还原":L"全屏"};
-    for(int i=0;i<7;++i){RECT area{i?90+(i-1)*60:0,0,i?90+i*60:90,Bar};DrawTextW(dc,labels[i],-1,&area,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);}
     if(!impl->windows){RECT hint{32,110,768,390};DrawTextW(dc,impl->message.c_str(),-1,&hint,DT_CENTER|DT_WORDBREAK|DT_NOPREFIX);}
-    else {RECT count{540,0,785,Bar};const auto label=std::to_wstring(impl->windows)+L" 个窗口 · Ctrl+滚轮缩放";DrawTextW(dc,label.c_str(),-1,&count,DT_RIGHT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);}
     SelectObject(dc,previous);
 }
 bool Workspace::mouse(UINT message,WPARAM buttons,int x,int y){
     if(!active())return false;
-    if(y<Bar && x<450 && message==WM_LBUTTONUP){const UINT action=x<90?(impl->mode?Single:Desktop):x<150?Choose:x<210?Launch:x<270?Next:x<330?Detach:x<390?Return:Fullscreen;PostMessageW(impl->owner,WM_COMMAND,action,0);return true;}
-    if(y<Bar && !impl->pointerDown)return true;
     if(message==WM_LBUTTONDOWN)impl->pointerDown=true;if(message==WM_LBUTTONUP)impl->pointerDown=false;
-    impl->pointer={std::clamp(x,0,Width-1),std::clamp(y-Bar,0,Height-1)};
-    if(host())PostMessageW(host(),Pointer,MAKELONG(message,static_cast<WORD>(buttons)),MAKELPARAM(impl->pointer.x,impl->pointer.y));return true;
+    impl->pointer={std::clamp(x,0,Width-1),std::clamp(y,0,Height-1)};
+    if(message==WM_LBUTTONDOWN && impl->process)AllowSetForegroundWindow(GetProcessId(impl->process));
+    if(host())PostMessageW(host(),Pointer,static_cast<WPARAM>(message)|(static_cast<WPARAM>(static_cast<uint32_t>(buttons))<<16),MAKELPARAM(impl->pointer.x,impl->pointer.y));return true;
 }
 bool Workspace::key(UINT message,WPARAM key,LPARAM data){
     if(!active())return false;
-    if(message==WM_KEYDOWN && (GetKeyState(VK_CONTROL)&0x8000)){
-        const UINT edit=key==L'V'?WM_PASTE:key==L'C'?WM_COPY:key==L'X'?WM_CUT:key==L'Z'?WM_UNDO:0;
-        if(edit){if(host())PostMessageW(host(),Keyboard,MAKELONG(edit,0),0);return true;}
-    }
-    if(message==WM_CHAR && (key==3 || key==22 || key==24 || key==26 || key==VK_TAB))return true;
     if(host())PostMessageW(host(),Keyboard,MAKELONG(message,static_cast<WORD>(key)),data);return true;
 }
 }

@@ -32,6 +32,11 @@ public static class AppCheck {
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr FindWindowEx(IntPtr p,IntPtr a,string c,string t);
  [DllImport("user32.dll")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int z,uint f);
  public static uint ProcessId(IntPtr h){uint id;GetWindowThreadProcessId(h,out id);return id;}
+ [StructLayout(LayoutKind.Sequential)]public struct GUI{public int cbSize,flags;public IntPtr active,focus,capture,menuOwner,moveSize,caret;public RECT caretRect;}
+ [DllImport("user32.dll")]public static extern bool GetGUIThreadInfo(uint thread,ref GUI info);
+ public static IntPtr Focus(IntPtr h){var info=new GUI{cbSize=Marshal.SizeOf(typeof(GUI))};uint p;GetGUIThreadInfo(GetWindowThreadProcessId(h,out p),ref info);return info.focus;}
+ [DllImport("user32.dll")]public static extern bool IsChild(IntPtr p,IntPtr c);
+ [DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();
 }
 '@
 function Await([scriptblock]$condition,[string]$failure){for($i=0;$i -lt 100;$i++){if(& $condition){return};Start-Sleep -Milliseconds 100};throw $failure}
@@ -39,11 +44,20 @@ $oldDpi=[EmbeddedWin]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $fixture=Join-Path $root "output/app-fixture-$PID.exe"
 Add-Type -OutputAssembly $fixture -OutputType WindowsApplication -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;using System.Windows.Forms;using System.Drawing;
+public class FixtureForm:Form {
+ public readonly Timer Animation=new Timer{Interval=16};int tick;
+ public FixtureForm(){Animation.Tick+=(s,e)=>{BackColor=Color.FromArgb(32+(tick++%40),92,126);Invalidate();};}
+ protected override void WndProc(ref Message m){if(m.Msg==0x805a)Animation.Start();if(m.Msg==0x805b)Animation.Stop();base.WndProc(ref m);}
+}
+public class WheelPanel:Panel {
+ protected override void WndProc(ref Message m){if(m.Msg==0x20a || m.Msg==0x20e)Parent.Text="PICO Application Wheel "+m.Msg+" "+unchecked((short)((m.WParam.ToInt64()>>16)&65535));base.WndProc(ref m);}
+}
 public static class AppFixture {
- [STAThread]public static void Main(string[] args){if(args.Length>0)System.IO.File.WriteAllText(args[0],"PICO_SHORTCUT_ARGS_OK");Application.EnableVisualStyles();var form=new Form{Text="PICO Application Fixture",Size=new Size(600,380),StartPosition=FormStartPosition.Manual,Location=new Point(100,100),BackColor=Color.FromArgb(32,92,126)};
+ [STAThread]public static void Main(string[] args){if(args.Length>0)System.IO.File.WriteAllText(args[0],"PICO_SHORTCUT_ARGS_OK");Application.EnableVisualStyles();var form=new FixtureForm{Text="PICO Application Fixture",Size=new Size(600,380),StartPosition=FormStartPosition.Manual,Location=new Point(100,100),BackColor=Color.FromArgb(32,92,126)};
  var edit=new TextBox{Location=new Point(60,70),Size=new Size(400,32),Font=new Font("Segoe UI",16)};
  var button=new Button{Text="Change colour",Location=new Point(60,140),Size=new Size(180,48)};
- button.Click+=(s,e)=>{form.BackColor=Color.FromArgb(155,45,72);form.Text="PICO Application Clicked";};form.Controls.Add(edit);form.Controls.Add(button);Application.Run(form);}
+ var wheel=new WheelPanel{Location=new Point(500,40),Size=new Size(240,280),AutoScroll=true,BackColor=Color.DarkSlateGray};wheel.Controls.Add(new Label{Location=new Point(10,900),Text="Bottom"});
+ button.Click+=(s,e)=>{form.BackColor=Color.FromArgb(155,45,72);form.Text="PICO Application Clicked";};form.Controls.Add(edit);form.Controls.Add(button);form.Controls.Add(wheel);Application.Run(form);}
 }
 '@
 $config=Join-Path $env:LOCALAPPDATA 'PicoPet/settings.ini'
@@ -95,7 +109,8 @@ try {
   $cx=[int]($extent*(.5+$worldX/120));$cy=[int]($extent*(.5+(44-$worldY)/120));$coord=[IntPtr](($cy -shl 16) -bor ($cx -band 0xffff))
   [void][EmbeddedWin]::SendMessage($pet,0x201,[IntPtr]1,$coord);[void][EmbeddedWin]::SendMessage($pet,0x202,[IntPtr]0,$coord)
  }
- ClickScreen 150 124
+ ClickScreen 150 80
+ Await {[AppCheck]::IsChild($appWindow,[AppCheck]::Focus($appWindow)) -and [AppCheck]::GetForegroundWindow() -ne $pet} 'Native application did not receive input focus'
  foreach($char in 'TV_INPUT_OK'.ToCharArray()){[void](Send $pet 0x102 ([int]$char))}
  $edit=[AppCheck]::Next($appWindow,[IntPtr]::Zero)
  function HasInput([string]$expected='TV_INPUT_OK') {
@@ -104,18 +119,30 @@ try {
   return $false
  }
  Await {HasInput} 'Projected typing did not reach the app'
- ClickScreen 140 205
+ ClickScreen 140 160
  Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Clicked'} 'Projected button click did not reach the app'
  $expected='TV_INPUT_OK'
- foreach($resolution in @(@(1,1280,730),@(2,1600,912))){
+ foreach($resolution in @(@(1,1280,800),@(2,1600,1000))){
   [void][EmbeddedWin]::SendMessage($hostWindow,0x801f,[IntPtr]($resolution[0] -shl 16),[IntPtr]15)
   $bounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$bounds)
   if($bounds.Right-$bounds.Left -ne $resolution[1] -or $bounds.Bottom-$bounds.Top -ne $resolution[2]){throw 'Independent application resolution was not applied'}
-  ClickScreen ([int](150*800/$resolution[1])) ([int](44+80*456/$resolution[2]))
+  ClickScreen ([int](150*800/$resolution[1])) ([int](80*500/$resolution[2]))
   [void](Send $pet 0x100 35);[void](Send $pet 0x101 35);[void](Send $pet 0x102 82);$expected+='R'
   Await {HasInput $expected} 'Input mapping failed at higher application resolution'
  }
  [void][EmbeddedWin]::SendMessage($hostWindow,0x801f,[IntPtr]0,[IntPtr]15)
+ $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r);$extent=$r.Right-$r.Left
+ $cx=$r.Left+[int]($extent*(.5+(620/800.0-.5)*83.6/120));$cy=$r.Top+[int]($extent*(.5+(44-(42.5+(.5-180/500.0)*47.6))/120));$wheelPoint=[IntPtr](($cy -shl 16) -bor ($cx -band 0xffff))
+ foreach($wheelTest in @(@(0x20a,-120),@(0x20a,120),@(0x20e,-120))){
+  [void][EmbeddedWin]::SendMessage($pet,$wheelTest[0],[IntPtr]($wheelTest[1] -shl 16),$wheelPoint)
+  Await {[AppCheck]::Title($appWindow) -eq "PICO Application Wheel $($wheelTest[0]) $($wheelTest[1])"} 'Wheel direction or delta was lost'
+ }
+ [void][EmbeddedWin]::SendMessage($hostWindow,0x801f,[IntPtr]0,[IntPtr]60)
+ [void](Send $appWindow 0x805a);Start-Sleep -Milliseconds 400
+ $frameStart=Send $pet 0x8003 83;$watch=[Diagnostics.Stopwatch]::StartNew();Start-Sleep -Milliseconds 2200;$frameEnd=Send $pet 0x8003 83;$watch.Stop()
+ $actualFps=[Math]::Round(($frameEnd-$frameStart)/$watch.Elapsed.TotalSeconds,1);[void](Send $appWindow 0x805b)
+ if($actualFps -lt 25){throw "Application frame delivery is still too slow: $actualFps FPS"}
+ Write-Host "Measured animated application delivery: $actualFps FPS"
  $second=Start-Process -FilePath $fixture -PassThru
  Await {$script:secondWindow=[AppCheck]::Find($second.Id);$secondWindow -ne [IntPtr]::Zero} 'Second app missing'
  $secondBefore=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($secondWindow,[ref]$secondBefore);$secondStyle=[AppCheck]::GetWindowLongPtr($secondWindow,-16)
@@ -127,7 +154,7 @@ try {
  [void][AppCheck]::ShowWindow($appWindow,3)
  Start-Sleep -Milliseconds 600
  $bounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$bounds)
- if($bounds.Right-$bounds.Left -gt 800 -or $bounds.Bottom-$bounds.Top -gt 456){throw 'Maximize escaped the application container'}
+ if($bounds.Right-$bounds.Left -gt 800 -or $bounds.Bottom-$bounds.Top -gt 500){throw 'Maximize escaped the application container'}
  [void](Send $pet 0x111 323)
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Original window parent not restored'
  $after=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$after)
@@ -144,7 +171,7 @@ try {
  Stop-Process -Id $petId
  $pet=[IntPtr]::Zero
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Helper failed to restore after owner exit'
- @{shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
+ @{nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
  Get-Content (Join-Path $root 'output/app-workspace-checks.json')
  if($Browser){
   $browserPath=Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
@@ -171,7 +198,7 @@ try {
    foreach($old in $existing){if([AppCheck]::GetParent($old) -ne [IntPtr]::Zero){throw 'Existing user browser window was unexpectedly attached'}}
    Await {(Send $pet 0x8003 83) -gt 3} 'Browser capture missing'
    $autoWidth=[Math]::Min(1920,[Math]::Max(1280,[int][Math]::Round(1024*[AppCheck]::GetDpiForWindow($hostWindow)/96)))
-   $autoHeight=[int][Math]::Round($autoWidth*456/800)
+   $autoHeight=[int][Math]::Round($autoWidth*500/800)
    $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($browserWindow,[ref]$r)
    if($r.Right-$r.Left -ne $autoWidth -or $r.Bottom-$r.Top -ne $autoHeight){throw 'Automatic browser canvas did not compensate for DPI'}
    Start-Sleep -Milliseconds 700
@@ -183,7 +210,7 @@ try {
    [void](Send $pet 0x111 328)
    [void](Send $pet 0x111 300)
    Await {$script:prefs=[EmbeddedWin]::FindWindow('PicoPet.Preferences','PICO · 偏好设置');$prefs -ne [IntPtr]::Zero} 'Preferences missing'
-   foreach($resolution in @(@(1,1280,730),@(2,1600,912))){
+   foreach($resolution in @(@(1,1280,800),@(2,1600,1000))){
     [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1020)) 0x14e ($resolution[0]+1));[void](Send $prefs 0x111 (1020 -bor (1 -shl 16)))
     Await {$r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($browserWindow,[ref]$r);($r.Right-$r.Left -eq $resolution[1]) -and ($r.Bottom-$r.Top -eq $resolution[2])} 'Browser resolution did not update from settings'
    }
