@@ -967,7 +967,10 @@ public:
         workspace.close();KillTimer(hwnd,9);appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();terminalDirty=true;renderedFace=-1;updateStyles();applyPolicy();
     }
     void workspaceTick(){
-        if(hidden || paused)return;workspace.tick();if(workspace.updated() && !hidden){terminalDirty=true;renderedFace=-1;render(ComputerDiagnostics,0);}
+        if((hidden || paused) && !workspace.exiting())return;
+        const bool exiting=workspace.exiting();workspace.tick();
+        if(exiting && !workspace.active()){closeWorkspace();desktopPinned=true;screenDesktop.dirty=true;if(!hidden)render(Computer,0);return;}
+        if(workspace.updated() && !hidden){terminalDirty=true;renderedFace=-1;render(ComputerDiagnostics,0);}
     }
     bool workspaceMouse(UINT message,WPARAM buttons,LPARAM coordinates){
         if(!workspace.active() || dragging)return false;
@@ -1238,7 +1241,7 @@ public:
         const auto k=trajectory.measure(static_cast<double>(now)/1000);
         if(!clicked)releaseVelocity(now);
         flushDrag(!settings.floating); cancelDrag(); saveSettings();
-        applyPolicy();if(clicked && assistant){if(workspace.active()){closeWorkspace();desktopPinned=true;screenDesktop.dirty=true;renderedFace=-1;render(Computer,0);}else toggleEmbeddedConsole();}else if(clicked && screenPage>=0)activateDesktop(screenPage);else if(clicked)react(Happy);else if(now<shakeUntil || k.shaking)react(Blink);else if(k.velocity.length()>650)react(Surprise);
+        applyPolicy();if(clicked && assistant){if(workspace.active()){workspace.exitApplications();appPointerDown=false;terminalDirty=true;renderedFace=-1;render(ComputerDiagnostics,0);}else toggleEmbeddedConsole();}else if(clicked && screenPage>=0)activateDesktop(screenPage);else if(clicked)react(Happy);else if(now<shakeUntil || k.shaking)react(Blink);else if(k.velocity.length()>650)react(Surprise);
     }
 };
 
@@ -1368,6 +1371,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             if(wp==81)return pet->workspace.attach(reinterpret_cast<HWND>(lp));
             if(wp==82)return pet->workspace.count();
             if(wp==83)return static_cast<LRESULT>(pet->workspace.frames());
+            if(wp==84)return pet->workspace.exiting();
             if(wp==0)return static_cast<LRESULT>(pet->draws);
             if(wp==1)return static_cast<LRESULT>(pet->timerWakes);
             if(wp==2)return (pet->hidden ? 1 : 0)|(pet->animationArmed ? 2 : 0)|(pet->paused ? 4 : 0)|(pet->motionArmed ? 8 : 0)|(pet->poseArmed ? 16 : 0);

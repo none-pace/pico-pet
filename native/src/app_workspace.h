@@ -24,6 +24,8 @@ public:
     void detach();
     void next();
     void close();
+    void exitApplications();
+    bool exiting()const;
     void suspend(bool value);
     void tick();
     bool active()const;

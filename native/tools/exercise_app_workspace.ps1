@@ -5,6 +5,8 @@ Add-Type @'
 using System;using System.Runtime.InteropServices;using System.Text;
 public static class AppCheck {
  [DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+ [DllImport("user32.dll")]static extern IntPtr SendMessageTimeout(IntPtr h,uint m,IntPtr w,IntPtr l,uint flags,uint timeout,out IntPtr result);
+ public static bool Responsive(IntPtr h){IntPtr result;return SendMessageTimeout(h,0x8003,new IntPtr(84),IntPtr.Zero,3,500,out result)!=IntPtr.Zero;}
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode)]public static extern bool WritePrivateProfileString(string section,string key,string value,string path);
  [DllImport("user32.dll")]public static extern uint GetDpiForWindow(IntPtr h);
  [StructLayout(LayoutKind.Sequential)]public struct RECT{public int Left,Top,Right,Bottom;}
@@ -45,9 +47,9 @@ $fixture=Join-Path $root "output/app-fixture-$PID.exe"
 Add-Type -OutputAssembly $fixture -OutputType WindowsApplication -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;using System.Windows.Forms;using System.Drawing;
 public class FixtureForm:Form {
- public readonly Timer Animation=new Timer{Interval=16};int tick;
+ public readonly Timer Animation=new Timer{Interval=16};int tick;bool refuse;
  public FixtureForm(){Animation.Tick+=(s,e)=>{BackColor=Color.FromArgb(32+(tick++%40),92,126);Invalidate();};}
- protected override void WndProc(ref Message m){if(m.Msg==0x805a)Animation.Start();if(m.Msg==0x805b)Animation.Stop();base.WndProc(ref m);}
+ protected override void WndProc(ref Message m){if(m.Msg==0x805e)new System.Threading.Thread(()=>System.Threading.Thread.Sleep(60000)).Start();if(m.Msg==0x805c){System.Threading.Thread.Sleep(60000);return;}if(m.Msg==0x805d)refuse=m.WParam!=IntPtr.Zero;if(m.Msg==0x10 && refuse)return;if(m.Msg==0x805a)Animation.Start();if(m.Msg==0x805b)Animation.Stop();base.WndProc(ref m);}
 }
 public class WheelPanel:Panel {
  protected override void WndProc(ref Message m){if(m.Msg==0x20a || m.Msg==0x20e)Parent.Text="PICO Application Wheel "+m.Msg+" "+unchecked((short)((m.WParam.ToInt64()>>16)&65535));base.WndProc(ref m);}
@@ -163,28 +165,73 @@ try {
  Start-Sleep -Milliseconds 600
  $bounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$bounds)
  if($bounds.Right-$bounds.Left -gt 800 -or $bounds.Bottom-$bounds.Top -gt 500){throw 'Maximize escaped the application container'}
- $petRect=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$petRect);$extent=$petRect.Right-$petRect.Left;$buttonPoint=$null
- for($y=[int]($extent*.71);$y -lt $extent*.78 -and !$buttonPoint;$y+=3){for($x=[int]($extent*.75);$x -lt $extent*.82;$x+=3){[void][EmbeddedWin]::SetCursorPos(($petRect.Left+$x),($petRect.Top+$y));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,[IntPtr](($y -shl 16) -bor $x));if((Send $pet 0x8003 27) -eq 1){$buttonPoint=[IntPtr](($y -shl 16) -bor $x);break}}}
- if(!$buttonPoint){throw 'Physical return button could not be reached'}
- [void][EmbeddedWin]::SendMessage($pet,0x201,[IntPtr]1,$buttonPoint);[void][EmbeddedWin]::SendMessage($pet,0x202,[IntPtr]0,$buttonPoint)
- Await {(Send $pet 0x8003 80) -eq 0} 'Physical button did not return to the TV desktop'
- if((Send $pet 0x8003 9) -lt 7){throw 'Physical return did not display the desktop'}
+ [void](Send $pet 0x111 323)
+ Await {(Send $pet 0x8003 80) -eq 0} 'Explicit release did not leave application mode'
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Original window parent not restored'
- $after=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$after)
+ $after=New-Object EmbeddedWin+RECT
+ Await {[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$after);$after.Left -ge 0 -and $after.Top -ge 0 -and $after.Right-$after.Left -ge 500} 'Window was not restored to the desktop'
  if(([AppCheck]::GetWindowLongPtr($appWindow,-16).ToInt64() -band 0x40000000) -ne 0){throw 'Restored window is still a child'}
  if($after.Left -lt 0 -or $after.Top -lt 0 -or $after.Right-$after.Left -lt 500){throw 'Window was not restored to the desktop'}
  Await {[AppCheck]::GetParent($secondWindow) -eq [IntPtr]::Zero} 'Second app not restored'
- $secondAfter=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($secondWindow,[ref]$secondAfter)
+ $secondAfter=New-Object EmbeddedWin+RECT
+ Await {[void][EmbeddedWin]::GetWindowRect($secondWindow,[ref]$secondAfter);$secondBefore.Left -eq $secondAfter.Left -and $secondBefore.Top -eq $secondAfter.Top -and $secondBefore.Right -eq $secondAfter.Right -and $secondBefore.Bottom -eq $secondAfter.Bottom} 'Second window placement did not settle'
  if($secondBefore.Left -ne $secondAfter.Left -or $secondBefore.Top -ne $secondAfter.Top -or $secondBefore.Right -ne $secondAfter.Right -or $secondBefore.Bottom -ne $secondAfter.Bottom -or [AppCheck]::GetWindowLongPtr($secondWindow,-16) -ne $secondStyle){throw 'Window placement or style not restored exactly'}
  [void](Send $pet 0x111 320)
  Await {(Send $pet 0x8003 80) -ne 0} 'Second host did not start'
  [void][EmbeddedWin]::SendMessage($pet,0x8003,[IntPtr]81,$appWindow)
  Await {(Send $pet 0x8003 82) -eq 1} 'Reattachment failed'
+ $petRect=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$petRect);$extent=$petRect.Right-$petRect.Left;$buttonPoint=$null
+ for($y=[int]($extent*.71);$y -lt $extent*.78 -and !$buttonPoint;$y+=3){for($x=[int]($extent*.75);$x -lt $extent*.82;$x+=3){[void][EmbeddedWin]::SetCursorPos(($petRect.Left+$x),($petRect.Top+$y));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,[IntPtr](($y -shl 16) -bor $x));if((Send $pet 0x8003 27) -eq 1){$buttonPoint=[IntPtr](($y -shl 16) -bor $x);break}}}
+ if(!$buttonPoint){throw 'Physical return button could not be reached'}
+ function RedButton {
+  $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r)
+  [void][EmbeddedWin]::SetCursorPos(($r.Left+($buttonPoint.ToInt64() -band 65535)),($r.Top+($buttonPoint.ToInt64() -shr 16)))
+  [void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,$buttonPoint)
+  if((Send $pet 0x8003 27) -ne 1){throw 'Red button hover did not reach the model'}
+  [void][EmbeddedWin]::SendMessage($pet,0x201,[IntPtr]1,$buttonPoint);[void][EmbeddedWin]::SendMessage($pet,0x202,[IntPtr]0,$buttonPoint)
+ }
+ [void][EmbeddedWin]::SendMessage($pet,0x8003,[IntPtr]81,$secondWindow)
+ Await {(Send $pet 0x8003 82) -eq 2} 'Close test attachment failed'
+ [void](Send $secondWindow 0x805e)
+ RedButton
+ if((Send $pet 0x8003 84) -ne 1){throw 'Exit transition did not start'}
+ RedButton
+ Await {(Send $pet 0x8003 80) -eq 0} 'Physical button did not complete exit'
+ Await {$app.HasExited -and $second.HasExited} 'Physical button left application processes running'
+ if((Send $pet 0x8003 9) -lt 7){throw 'Exit did not display TV desktop'}
+ if((Send $pet 0x8003 25) -ne 0){throw 'Repeated red click opened terminal during exit'}
+ $app=Start-Process -FilePath $fixture -PassThru
+ Await {$script:appWindow=[AppCheck]::Find($app.Id);$appWindow -ne [IntPtr]::Zero} 'Hung fixture missing'
+ [void](Send $pet 0x111 320)
+ Await {(Send $pet 0x8003 80) -ne 0} 'Hung test host missing'
+ [void][EmbeddedWin]::SendMessage($pet,0x8003,[IntPtr]81,$appWindow)
+ Await {(Send $pet 0x8003 82) -eq 1} 'Hung fixture attachment failed'
+ [void][AppCheck]::PostMessage($appWindow,0x805c,[IntPtr]0,[IntPtr]0)
+ Start-Sleep -Milliseconds 200
+ $closeWatch=[Diagnostics.Stopwatch]::StartNew();RedButton
+ for($sample=0;$sample -lt 15;$sample++){
+  if(![AppCheck]::Responsive($pet)){throw 'Pet UI stalled during hung-app shutdown'}
+  Start-Sleep -Milliseconds 100
+ }
+ Await {(Send $pet 0x8003 80) -eq 0} 'Hung application prevented return'
+ Await {$app.HasExited} 'Hung process survived shutdown'
+ if($closeWatch.Elapsed.TotalSeconds -gt 9){throw 'Hung-app close exceeded deadline'}
+ $app=Start-Process -FilePath $fixture -PassThru
+ Await {$script:appWindow=[AppCheck]::Find($app.Id);$appWindow -ne [IntPtr]::Zero} 'Cancel-close fixture missing'
+ [void](Send $pet 0x111 320)
+ Await {(Send $pet 0x8003 80) -ne 0} 'Cancel-close host missing'
+ [void][EmbeddedWin]::SendMessage($pet,0x8003,[IntPtr]81,$appWindow)
+ Await {(Send $pet 0x8003 82) -eq 1} 'Cancel-close attachment failed'
+ [void](Send $appWindow 0x805d 1)
+ RedButton
+ Await {(Send $pet 0x8003 84) -eq 0} 'Cancelled close never left transition'
+ if($app.HasExited -or (Send $pet 0x8003 82) -ne 1){throw 'Responsive application refusing close was forcibly ended'}
+ [void](Send $appWindow 0x805d 0)
  [uint32]$petId=0;[void][PicoControl]::GetWindowThreadProcessId($pet,[ref]$petId)
  Stop-Process -Id $petId
  $pet=[IntPtr]::Zero
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Helper failed to restore after owner exit'
- @{stableHover=$true;realLeave=$true;physicalReturn=$true;nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
+ @{stableHover=$true;realLeave=$true;physicalReturn=$true;processExit=$true;windowlessProcessExit=$true;hungAppExit=$true;closeTransition=$true;repeatClose=$true;cancelClosePreserved=$true;nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
  Get-Content (Join-Path $root 'output/app-workspace-checks.json')
  if($Browser){
   $browserPath=Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
@@ -230,7 +277,12 @@ try {
    [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1019)) 0x14e 1);[void](Send $prefs 0x111 (1019 -bor (1 -shl 16)))
    if(!((Get-Content -LiteralPath $config) -contains 'shortcutTarget=1') -or !((Get-Content -LiteralPath $config) -contains 'appResolution=2')){throw 'Application preferences were not persisted'}
    [void](Send $prefs 0x10)
-   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;processId=[AppCheck]::ProcessId($browserWindow)} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
+   $browserPid=[AppCheck]::ProcessId($browserWindow)
+   RedButton
+   Await {(Send $pet 0x8003 80) -eq 0} 'Browser red-button close did not return'
+   Await {[AppCheck]::ProcessId($browserWindow) -ne $browserPid} 'TV browser window was not closed'
+   foreach($old in $existing){if([AppCheck]::ProcessId($old) -eq 0 -or [AppCheck]::GetParent($old) -ne [IntPtr]::Zero){throw 'Red button damaged an existing desktop browser window'}}
+   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;browserClose=$true;processId=$browserPid} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
    Get-Content (Join-Path $root 'output/browser-workspace-checks.json')
   }finally{
    if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}
@@ -241,8 +293,8 @@ try {
  }
 } finally {
  if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}
- if($app -and !$app.HasExited){[void](Send ([AppCheck]::Find($app.Id)) 0x10)}
- if($second -and !$second.HasExited){[void](Send ([AppCheck]::Find($second.Id)) 0x10)}
+ if($app -and !$app.HasExited){Stop-Process -Id $app.Id -ErrorAction SilentlyContinue}
+ if($second -and !$second.HasExited){Stop-Process -Id $second.Id -ErrorAction SilentlyContinue}
  & (Join-Path $PSScriptRoot 'control.ps1') -Action Exit
  Copy-Item -LiteralPath $backup -Destination $config -Force
  Start-Process -FilePath $restart -WindowStyle Hidden

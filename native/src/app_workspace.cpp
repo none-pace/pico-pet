@@ -27,7 +27,7 @@ SIZE canvas(int resolution,UINT dpi=96){
 constexpr UINT Attach=WM_APP+30,Configure=WM_APP+31,Release=WM_APP+32,Pointer=WM_APP+33,Keyboard=WM_APP+34,Paused=WM_APP+35,Cycle=WM_APP+36,Immersive=WM_APP+37;
 struct Shared {
     DWORD parent=0;HWND owner=nullptr,host=nullptr;
-    LONG generation=0,count=0,mode=0,fps=60,closing=0,resolution=0,framePending=0;
+    LONG generation=0,count=0,mode=0,fps=60,closing=0,resolution=0,framePending=0,quitting=0;
     wchar_t status[256]{};
     std::array<uint32_t,Width*Height> pixels{};
 };
@@ -137,6 +137,49 @@ struct Capture {
     }
 };
 struct Entry {HWND window=nullptr,parent=nullptr,owner=nullptr;DWORD pid=0;LONG_PTR style=0,exstyle=0;WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};RECT rect{};};
+// Closing is independent of the host UI and its foreign-window paint/input queues.
+// Hold process handles throughout: a recycled PID must never become a kill target.
+struct Shutdown {
+    struct Target {HWND window;DWORD pid;HANDLE process;bool browser;};
+    std::vector<Target> targets;std::atomic_bool cancel=false;std::atomic_int result=0;
+    ~Shutdown(){for(const auto& t:targets)if(t.process)CloseHandle(t.process);}
+    static bool alive(const Target& t){DWORD pid=0;GetWindowThreadProcessId(t.window,&pid);return IsWindow(t.window) && pid==t.pid && (!t.process || WaitForSingleObject(t.process,0)==WAIT_TIMEOUT);}
+    bool externalWindow(const Target& target)const{
+        struct Search {const Shutdown* self;DWORD pid;bool found=false;} search{this,target.pid};
+        EnumWindows([](HWND h,LPARAM data)->BOOL{auto& s=*reinterpret_cast<Search*>(data);DWORD pid=0;GetWindowThreadProcessId(h,&pid);
+            if(pid==s.pid && IsWindowVisible(h) && std::none_of(s.self->targets.begin(),s.self->targets.end(),[h](const Target& t){return t.window==h;})){s.found=true;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&search));
+        return search.found;
+    }
+    void run(){
+        for(const auto& t:targets)if(!cancel && alive(t))PostMessageW(t.window,WM_CLOSE,0,0);
+        const auto began=GetTickCount64();bool forced=false;
+        while(!cancel){
+            bool pending=false;
+            for(const auto& t:targets){
+                const bool live=alive(t),running=t.process && WaitForSingleObject(t.process,0)==WAIT_TIMEOUT;
+                const bool shared=t.browser || externalWindow(t);
+                if(!live && (!running || shared))continue;
+                pending=true;
+                if(GetTickCount64()-began>=2500 && running && !shared){
+                    DWORD_PTR ignored=0;
+                    // Responsive applications can be waiting for a save confirmation.
+                    const bool hung=live && !SendMessageTimeoutW(t.window,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,100,&ignored);
+                    if(!cancel && (!live || hung)){if(TerminateProcess(t.process,1))forced=true;}
+                }
+            }
+            if(!pending){result=1;return;}
+            if(GetTickCount64()-began>= (forced?5500u:3500u))break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if(!cancel){
+            // Owned modal dialogs are top-level windows; bring any confirmation back
+            // into view instead of leaving it beside the off-screen capture host.
+            EnumWindows([](HWND h,LPARAM data)->BOOL{auto& self=*reinterpret_cast<Shutdown*>(data);const HWND owner=GetWindow(h,GW_OWNER);
+                if(IsWindowVisible(h) && std::any_of(self.targets.begin(),self.targets.end(),[owner](const Target& t){return owner==t.window && alive(t);})){RECT area{};SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0);SetWindowPos(h,HWND_TOP,area.left+80,area.top+80,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_ASYNCWINDOWPOS);}return TRUE;},reinterpret_cast<LPARAM>(this));
+            result=2;
+        }
+    }
+};
 struct Host {
     struct InputHook {DWORD thread;HHOOK hook;};
     HMODULE inputModule=nullptr;HOOKPROC inputProc=nullptr;std::vector<InputHook> inputHooks;std::vector<HWND> hoverWindows;
@@ -247,6 +290,7 @@ struct Host {
     }
     void tick(){
         if(link.data->closing || WaitForSingleObject(parent,0)!=WAIT_TIMEOUT){DestroyWindow(window);return;}
+        if(link.data->quitting)return;
         const auto now=GetTickCount64();if(now-checked>=250){checked=now;
             entries.erase(std::remove_if(entries.begin(),entries.end(),[](const Entry& e){DWORD pid=0;GetWindowThreadProcessId(e.window,&pid);return !IsWindow(e.window)||pid!=e.pid;}),entries.end());
             for(auto& e:entries){RECT rect{};GetWindowRect(e.window,&rect);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&rect),2);
@@ -262,6 +306,7 @@ struct Host {
         auto* self=reinterpret_cast<Host*>(GetWindowLongPtrW(h,GWLP_USERDATA));
         if(m==WM_NCCREATE){self=static_cast<Host*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);self->window=h;SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
         if(!self)return DefWindowProcW(h,m,w,l);
+        if(self->link.data->quitting && m>=Attach && m<=Immersive && m!=Paused)return 0;
         switch(m){
         case WM_TIMER:self->tick();return 0;
         case Attach:self->attach(reinterpret_cast<HWND>(l));return 0;
@@ -308,11 +353,13 @@ struct Workspace::Impl {
     int mode=0,fps=60,windows=0;uint64_t frameCount=0;std::wstring message=L"正在启动应用容器…";
     DWORD launchedPid=0;ULONGLONG launchDeadline=0,launchChecked=0;std::vector<HWND> beforeLaunch;std::wstring browserPath;
     std::array<uint32_t,Width*Height> pixels{};HFONT font=nullptr;POINT pointer{};bool pointerDown=false;
+    std::shared_ptr<Shutdown> shutdown;ULONGLONG exitBegan=0,hostExitBegan=0,noticeUntil=0;
     ~Impl(){if(font)DeleteObject(font);if(process)CloseHandle(process);}
 };
 Workspace::Workspace():impl(std::make_unique<Impl>()){}
 Workspace::~Workspace(){close();}
 bool Workspace::active()const{return impl->link!=nullptr;}
+bool Workspace::exiting()const{return impl->shutdown!=nullptr;}
 HWND Workspace::host()const{return active()?impl->link->data->host:nullptr;}
 int Workspace::count()const{return impl->windows;}
 uint64_t Workspace::frames()const{return impl->frameCount;}
@@ -329,7 +376,7 @@ void Workspace::open(HWND owner,int mode,int fps,int resolution){
     CloseHandle(process.hThread);impl->process=process.hProcess;impl->link=std::move(link);
 }
 void Workspace::configure(int mode,int fps,int resolution){impl->mode=mode;impl->fps=fps;if(host())PostMessageW(host(),Configure,MAKELONG(mode,std::clamp(resolution,0,3)),fps);impl->dirty=true;}
-bool Workspace::attach(HWND window){return host() && PostMessageW(host(),Attach,0,reinterpret_cast<LPARAM>(window));}
+bool Workspace::attach(HWND window){return !exiting() && host() && PostMessageW(host(),Attach,0,reinterpret_cast<LPARAM>(window));}
 void Workspace::fullscreen(){impl->immersive=!impl->immersive;if(host())PostMessageW(host(),Immersive,0,0);impl->dirty=true;}
 void Workspace::next(){if(host())PostMessageW(host(),Cycle,0,0);}
 void Workspace::detach(){if(host())PostMessageW(host(),Release,0,0);}
@@ -350,6 +397,7 @@ void Workspace::launch(){
     if(SUCCEEDED(dialog->Show(impl->owner))){Microsoft::WRL::ComPtr<IShellItem> item;if(SUCCEEDED(dialog->GetResult(item.GetAddressOf()))){PWSTR path=nullptr;if(SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH,&path))){const std::wstring selected=path;CoTaskMemFree(path);launchPath(selected);}}}
 }
 bool Workspace::launchPath(const std::wstring& path){
+    if(exiting())return false;
     const auto target=launchTarget(path);impl->browserPath=target.browser?target.executable:L"";
     impl->launchDeadline=0;impl->launchChecked=0;impl->launchedPid=0;
     impl->beforeLaunch.clear();EnumWindows([](HWND h,LPARAM data)->BOOL{reinterpret_cast<std::vector<HWND>*>(data)->push_back(h);return TRUE;},reinterpret_cast<LPARAM>(&impl->beforeLaunch));
@@ -360,14 +408,49 @@ bool Workspace::launchPath(const std::wstring& path){
     impl->launchDeadline=GetTickCount64()+15000;impl->message=L"正在启动应用，窗口就绪后会自动显示在电视内…";impl->dirty=true;return true;
 }
 void Workspace::close(){
+    if(impl->shutdown){impl->shutdown->cancel=true;impl->shutdown.reset();}impl->hostExitBegan=0;impl->noticeUntil=0;
     if(!active())return;InterlockedExchange(&impl->link->data->closing,1);if(host())PostMessageW(host(),WM_CLOSE,0,0);
     // The helper also watches the owner's process; never kill it before restoration finishes.
     impl->link.reset();if(impl->process){CloseHandle(impl->process);impl->process=nullptr;}impl->windows=0;impl->pointerDown=false;impl->launchDeadline=0;
+}
+void Workspace::exitApplications(){
+    if(!active() || exiting())return;
+    // Finish automatic attachment before accepting close, so a just-launched app
+    // cannot escape the request while its window is still being created.
+    if(impl->launchDeadline){impl->message=L"应用正在启动，请窗口显示后再关闭。";impl->dirty=true;impl->noticeUntil=GetTickCount64()+3500;return;}
+    auto shutdown=std::make_shared<Shutdown>();
+    const HWND container=host();
+    for(HWND child=container?GetWindow(container,GW_CHILD):nullptr;child;child=GetWindow(child,GW_HWNDNEXT)){
+        DWORD pid=0;GetWindowThreadProcessId(child,&pid);if(!pid || pid==GetCurrentProcessId() || pid==GetProcessId(impl->process))continue;
+        HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_TERMINATE,FALSE,pid);
+        if(!process)process=OpenProcess(SYNCHRONIZE,FALSE,pid);
+        shutdown->targets.push_back({child,pid,process,chromium(child)});
+    }
+    InterlockedExchange(&impl->link->data->quitting,1);
+    if(container)PostMessageW(container,Paused,TRUE,0);
+    impl->pointerDown=false;impl->exitBegan=GetTickCount64();impl->hostExitBegan=0;impl->noticeUntil=0;
+    impl->shutdown=shutdown;impl->message=L"正在关闭电视内的应用…";impl->dirty=true;
+    std::thread([shutdown]{shutdown->run();}).detach();
 }
 void Workspace::suspend(bool value){if(value==impl->paused)return;impl->paused=value;if(host())PostMessageW(host(),Paused,value,0);}
 void Workspace::tick(){
     if(!active())return;
     InterlockedExchange(&impl->link->data->framePending,0);
+    if(exiting()){
+        impl->dirty=true;const auto now=GetTickCount64();const int result=impl->shutdown->result;
+        if(result==1 && now-impl->exitBegan>=450){
+            if(!impl->hostExitBegan){impl->hostExitBegan=now;InterlockedExchange(&impl->link->data->closing,1);if(host())PostMessageW(host(),WM_CLOSE,0,0);}
+            impl->message=L"应用已退出，正在返回桌面…";
+            if(WaitForSingleObject(impl->process,0)==WAIT_OBJECT_0){close();return;}
+            // All attached windows have gone. A host stuck in foreign teardown can
+            // now be ended without orphaning any application window.
+            if(now-impl->hostExitBegan>=2000)TerminateProcess(impl->process,0);
+        }else if(result==2){
+            impl->shutdown.reset();InterlockedExchange(&impl->link->data->quitting,0);if(host())PostMessageW(host(),Paused,impl->paused,0);
+            impl->message=L"应用尚未退出，请处理保存提示或关闭确认后重试。";impl->noticeUntil=now+5000;
+        }
+        return;
+    }
     if(WaitForSingleObject(impl->process,0)==WAIT_OBJECT_0){if(impl->message!=L"应用容器已停止，请返回后重试"){impl->message=L"应用容器已停止，请返回后重试";impl->dirty=true;}return;}
     if(impl->launchDeadline && host() && GetTickCount64()-impl->launchChecked>=100){
         impl->launchChecked=GetTickCount64();
@@ -382,20 +465,24 @@ void Workspace::tick(){
     }
     if(impl->link->lock()){
         auto& shared=*impl->link->data;impl->windows=shared.count;
-        if(shared.generation!=impl->generation){impl->generation=shared.generation;impl->pixels=shared.pixels;if(!impl->launchDeadline)impl->message=shared.status;impl->dirty=true;++impl->frameCount;}
+        if(shared.generation!=impl->generation){impl->generation=shared.generation;impl->pixels=shared.pixels;if(!impl->launchDeadline && !impl->noticeUntil)impl->message=shared.status;impl->dirty=true;++impl->frameCount;}
         impl->link->unlock();
     }
+    if(impl->noticeUntil && GetTickCount64()>=impl->noticeUntil){impl->noticeUntil=0;impl->dirty=true;}
 }
 bool Workspace::updated(){const bool dirty=impl->dirty;impl->dirty=false;return dirty;}
 void Workspace::draw(HDC dc,uint32_t* pixels){
     std::copy(impl->pixels.begin(),impl->pixels.end(),pixels);
+    if(exiting())for(int i=0;i<Width*Height;++i){const auto c=pixels[i];pixels[i]=0xff000000u|(((c>>16&255)/4+12)<<16)|(((c>>8&255)/4+20)<<8)|((c&255)/4+28);}
     if(!impl->font)impl->font=CreateFontW(-17,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
     const auto previous=SelectObject(dc,impl->font);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(219,238,231));
-    if(!impl->windows){RECT hint{32,110,768,390};DrawTextW(dc,impl->message.c_str(),-1,&hint,DT_CENTER|DT_WORDBREAK|DT_NOPREFIX);}
+    if(exiting() || !impl->windows){RECT hint{32,218,768,300};DrawTextW(dc,impl->message.c_str(),-1,&hint,DT_CENTER|DT_WORDBREAK|DT_NOPREFIX);}
+    else if(impl->noticeUntil){RECT area{0,0,Width,60};HBRUSH background=CreateSolidBrush(RGB(22,32,42));FillRect(dc,&area,background);DeleteObject(background);RECT hint{20,16,780,56};DrawTextW(dc,impl->message.c_str(),-1,&hint,DT_CENTER|DT_WORDBREAK|DT_NOPREFIX);}
     SelectObject(dc,previous);
 }
 bool Workspace::mouse(UINT message,WPARAM buttons,int x,int y){
     if(!active())return false;
+    if(exiting())return true;
     if(message==WM_LBUTTONDOWN)impl->pointerDown=true;if(message==WM_LBUTTONUP)impl->pointerDown=false;
     impl->pointer={std::clamp(x,0,Width-1),std::clamp(y,0,Height-1)};
     if(message==WM_LBUTTONDOWN && impl->process)AllowSetForegroundWindow(GetProcessId(impl->process));
@@ -403,6 +490,7 @@ bool Workspace::mouse(UINT message,WPARAM buttons,int x,int y){
 }
 bool Workspace::key(UINT message,WPARAM key,LPARAM data){
     if(!active())return false;
+    if(exiting())return true;
     if(host())PostMessageW(host(),Keyboard,MAKELONG(message,static_cast<WORD>(key)),data);return true;
 }
 }
