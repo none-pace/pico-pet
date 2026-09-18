@@ -13,8 +13,8 @@ class Workspace {
     std::unique_ptr<Impl> impl;
 public:
     Workspace();~Workspace();
-    void open(HWND owner,int mode,int fps);
-    void configure(int mode,int fps);
+    void open(HWND owner,int mode,int fps,int resolution=0);
+    void configure(int mode,int fps,int resolution=0);
     void choose();
     void launch();
     bool launchPath(const std::wstring& path);

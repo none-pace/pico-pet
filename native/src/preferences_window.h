@@ -116,6 +116,8 @@ class Window {
         toggle(L"待机节能（降低悬浮更新频率）",&Settings::economy);
         choice(L"应用显示模式",&Settings::appMode,{{L"单应用铺满",0},{L"多窗口桌面",1}});
         number(L"应用画面上限（FPS，5–30）",&Settings::appFps,5,30);
+        choice(L"快捷方式默认打开位置",&Settings::shortcutTarget,{{L"电视屏幕内（默认）",0},{L"Windows 桌面",1}});
+        choice(L"电视应用画布分辨率",&Settings::appResolution,{{L"800 × 456 · 大字 / 低占用",0},{L"1280 × 720 · 更多内容",1},{L"1600 × 900 · 宽广视野",2}});
         HWND title=control(L"STATIC",L"偏好设置",0,24,18,650,28,0);SendMessageW(title,WM_SETFONT,reinterpret_cast<WPARAM>(titleFont),TRUE);
         INITCOMMONCONTROLSEX common{sizeof(common),ICC_TAB_CLASSES};InitCommonControlsEx(&common);
         HWND tabs=control(WC_TABCONTROLW,L"",WS_TABSTOP,24,58,656,30,903);
@@ -123,7 +125,7 @@ class Window {
         loading=true;
         std::array<int,4> counts{};
         for(size_t i=0;i<fields.size();++i){const auto& f=fields[i];const int page=i>=17?3:i>=9?2:i>=4 && i<=6?1:0;
-            const int slot=counts[page]++,col=slot/4,row=slot%4,x=24+col*348,y=116+row*65;
+            const int slot=counts[page]++,col=slot/4,row=slot%4,x=24+col*348,y=116+row*(page==3?55:65);
             pages[page].push_back(control(L"STATIC",f.label,0,x,y,310,20,0));
             HWND c=control(f.choices.empty()?L"EDIT":L"COMBOBOX",L"",WS_TABSTOP|(f.choices.empty()?ES_AUTOHSCROLL:CBS_DROPDOWNLIST|WS_VSCROLL),x,y+21,310,f.choices.empty()?27:230,1000+static_cast<int>(i));
             pages[page].push_back(c);
@@ -142,7 +144,7 @@ class Window {
         pages[3].push_back(control(L"BUTTON",L"进入电视应用",WS_TABSTOP|BS_PUSHBUTTON,372,116,240,30,920));
         pages[3].push_back(control(L"BUTTON",L"接入已打开的窗口…",WS_TABSTOP|BS_PUSHBUTTON,372,162,240,30,921));
         pages[3].push_back(control(L"BUTTON",L"返回桌宠 · 恢复窗口",WS_TABSTOP|BS_PUSHBUTTON,372,208,240,30,922));
-        pages[3].push_back(control(L"STATIC",L"屏内滚轮操作应用，Ctrl+滚轮缩放电视。\nShift+右键打开桌宠菜单。\n兼容模式：传统 Win32 应用；GPU 界面可能黑屏。\n独占全屏和部分弹窗不兼容；退出时恢复窗口。",0,24,270,650,100,923));
+        pages[3].push_back(control(L"STATIC",L"画布独立于桌面分辨率；更高分辨率显示更多内容，文字会变小。\nCtrl+滚轮缩放电视，Shift+右键打开菜单；部分 GPU 界面和弹窗不兼容。",0,24,350,650,46,923));
         status=control(L"STATIC",L"",0,24,400,650,40,900);
         control(L"BUTTON",L"关闭",BS_DEFPUSHBUTTON|WS_TABSTOP,584,450,96,28,IDCANCEL);
         pages[0].push_back(control(L"BUTTON",L"导入表情图片…",BS_PUSHBUTTON|WS_TABSTOP,24,450,180,28,901));

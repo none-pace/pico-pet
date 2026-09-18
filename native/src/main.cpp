@@ -106,7 +106,7 @@ struct Settings {
     bool topmost = true, clickThrough = false, autoHide = true, economy = true;
     bool floating = false;
     bool hd = false;
-    int appMode=0,appFps=15;
+    int appMode=0,appFps=15,shortcutTarget=0,appResolution=0;
     int layerMode=0;
     DWORD layerPid=0;
     std::wstring layerPath;
@@ -360,6 +360,8 @@ public:
         settings.topmost = get(L"topmost", 1) != 0;
         settings.layerMode=std::clamp(get(L"layerMode",0),0,1);
         settings.appMode=std::clamp(get(L"appMode",0),0,1);settings.appFps=std::clamp(get(L"appFps",15),5,30);
+        settings.shortcutTarget=std::clamp(get(L"shortcutTarget",0),0,1);
+        settings.appResolution=std::clamp(get(L"appResolution",0),0,2);
         wchar_t layerPath[32768]{};GetPrivateProfileStringW(L"PICO",L"layerPath",L"",layerPath,32768,configPath.c_str());settings.layerPath=layerPath;
         wchar_t layerPid[16]{};GetPrivateProfileStringW(L"PICO",L"layerPid",L"0",layerPid,16,configPath.c_str());
         wchar_t* layerPidEnd=nullptr;const auto parsedLayerPid=wcstoull(layerPid,&layerPidEnd,10);
@@ -397,6 +399,8 @@ public:
         put(L"hd", settings.hd);
         put(L"frameRate",settings.frameRate);put(L"pixelThreshold",settings.pixelThreshold);
         put(L"material",settings.material);put(L"appMode",settings.appMode);put(L"appFps",settings.appFps);
+        put(L"shortcutTarget",settings.shortcutTarget);
+        put(L"appResolution",settings.appResolution);
         settings.yaw=static_cast<int>(std::lround(baseYaw*1000));settings.pitch=static_cast<int>(std::lround(basePitch*1000));settings.pauseAnimation=paused;
         put(L"yaw",settings.yaw);put(L"pitch",settings.pitch);put(L"paused",paused);
         put(L"motionAmplitude",settings.motionAmplitude);put(L"throwGain",settings.throwGain);put(L"rotationSensitivity",settings.rotationSensitivity);
@@ -951,7 +955,7 @@ public:
     void openWorkspace(){
         if(workspace.active())return;
         if(embeddedConsole.visible())embeddedConsole.hide();
-        stopAnimation();stopMotion();stopPose();workspace.open(hwnd,settings.appMode,settings.appFps);
+        stopAnimation();stopMotion();stopPose();workspace.open(hwnd,settings.appMode,settings.appFps,settings.appResolution);
         SetTimer(hwnd,9,33,nullptr);terminalDirty=true;renderedFace=-1;updateStyles();SetForegroundWindow(hwnd);SetFocus(hwnd);render(ComputerDiagnostics,0);
     }
     void closeWorkspace(){
@@ -1019,7 +1023,7 @@ public:
         snapshot.yaw=static_cast<int>(std::lround(baseYaw*1000));snapshot.pitch=static_cast<int>(std::lround(basePitch*1000));
         preferencesWindow.open(hwnd,snapshot,[this](const Settings& next){
             const bool resized=next.size!=settings.size,qualityChanged=next.hd!=settings.hd;
-            stopMotion();stopPose();settings=next;workspace.configure(settings.appMode,settings.appFps);paused=settings.pauseAnimation;resetOrientation();
+            stopMotion();stopPose();settings=next;workspace.configure(settings.appMode,settings.appFps,settings.appResolution);paused=settings.pauseAnimation;resetOrientation();
             if(qualityChanged){for(auto& cached:poseCache)cached=CachedPose{};composition.clear();composedPose=composedFace=-1;}
             renderedFace=-1;
             if(resized){RECT r{};GetWindowRect(hwnd,&r);resizeSurface();place({r.left,r.top},false);}
@@ -1048,15 +1052,17 @@ public:
         screenDesktop.dirty=true;renderedFace=-1;render(settings.mood,0);
         HMENU popup=createMenu();
         InsertMenuW(popup,0,MF_BYPOSITION|MF_STRING,AddScreenFile,L"添加程序或文件…");InsertMenuW(popup,1,MF_BYPOSITION|MF_STRING,AddScreenFolder,L"添加文件夹…");InsertMenuW(popup,2,MF_BYPOSITION|MF_SEPARATOR,0,nullptr);
-        constexpr UINT openShortcut=4000,removeShortcut=4001,openInTV=4002,removeBase=4100;
+        constexpr UINT openShortcut=4000,removeShortcut=4001,openInTV=4002,openOnDesktop=4003,removeBase=4100;
         if(index>=0 && index<4+static_cast<int>(screenDesktop.count())){InsertMenuW(popup,0,MF_BYPOSITION|MF_STRING,openShortcut,L"打开选中项目");if(index>=4){InsertMenuW(popup,1,MF_BYPOSITION|MF_STRING,openInTV,L"在电视中打开");InsertMenuW(popup,2,MF_BYPOSITION|MF_STRING,removeShortcut,L"从屏幕移除快捷方式");}}
         else if(screenDesktop.count()){
             HMENU remove=CreatePopupMenu();for(size_t i=0;i<screenDesktop.count();++i){auto name=screenDesktop.name(static_cast<int>(i)+4);size_t pos=0;while((pos=name.find(L'&',pos))!=std::wstring::npos){name.insert(pos,1,L'&');pos+=2;}AppendMenuW(remove,MF_STRING,removeBase+i,name.c_str());}InsertMenuW(popup,2,MF_BYPOSITION|MF_POPUP,reinterpret_cast<UINT_PTR>(remove),L"移除快捷方式");
         }
+        if(index>=4 && index<4+static_cast<int>(screenDesktop.count()))InsertMenuW(popup,2,MF_BYPOSITION|MF_STRING,openOnDesktop,L"在桌面中打开");
         SetForegroundWindow(hwnd);const auto chosen=TrackPopupMenuEx(popup,TPM_RETURNCMD|TPM_RIGHTBUTTON,at.x,at.y,hwnd,nullptr);DestroyMenu(popup);
         PostMessageW(hwnd,WM_NULL,0,0);inMenu=desktopMenu=false;screenDesktop.dirty=true;renderedFace=-1;applyPolicy();
         if(chosen==openShortcut)activateDesktop(index);
         else if(chosen==openInTV){const auto path=screenDesktop.path(index);if(!path.empty()){openWorkspace();workspace.launchPath(path);}}
+        else if(chosen==openOnDesktop)screenDesktop.launch(hwnd,index);
         else if(chosen==removeShortcut || (chosen>=removeBase && chosen<removeBase+32)){
             screenDesktop.remove(hwnd,chosen==removeShortcut?index:static_cast<int>(chosen-removeBase)+4);
             renderedFace=-1;render(settings.mood,0);
@@ -1070,7 +1076,9 @@ public:
         if(index==screendesktop::Settings){openPreferences();return;}
         if(index<0 || index>=4+static_cast<int>(screenDesktop.count()))return;
         screenDesktop.selected=index;screenDesktop.dirty=true;renderedFace=-1;render(settings.mood,0);
-        if(index<4)systemdesk::open(index);else screenDesktop.launch(hwnd,index);
+        if(index<4)systemdesk::open(index);
+        else if(settings.shortcutTarget==0){openWorkspace();workspace.launchPath(screenDesktop.path(index));}
+        else screenDesktop.launch(hwnd,index);
     }
     HMENU createMenu() {
         HMENU root=CreatePopupMenu(),appearance=CreatePopupMenu(),material=CreatePopupMenu(),system=CreatePopupMenu();
@@ -1127,7 +1135,7 @@ public:
         case appworkspace::Detach:workspace.detach();return;
         case appworkspace::Next:workspace.next();return;
         case appworkspace::Fullscreen:workspace.fullscreen();return;
-        case appworkspace::Single:case appworkspace::Desktop:settings.appMode=id==appworkspace::Desktop;workspace.configure(settings.appMode,settings.appFps);saveSettings();return;
+        case appworkspace::Single:case appworkspace::Desktop:settings.appMode=id==appworkspace::Desktop;workspace.configure(settings.appMode,settings.appFps,settings.appResolution);saveSettings();return;
         case OpenSettings:openPreferences();return;
         case ImportExpression:case UseExpression:case BuiltinExpression:case ExpressionContain:case ExpressionCover:case ExpressionDark:case ExpressionLight:configureExpression(id);return;
         case ScreenShortcuts:{POINT at{};GetCursorPos(&at);desktopContext(at);return;}

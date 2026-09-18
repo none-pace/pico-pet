@@ -1,4 +1,5 @@
-﻿$ErrorActionPreference='Stop'
+﻿param([switch]$Browser)
+$ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'test_support.ps1') -Mode Embedded
 Add-Type @'
 using System;using System.Runtime.InteropServices;using System.Text;
@@ -25,6 +26,7 @@ public static class AppCheck {
  [DllImport("user32.dll")]public static extern IntPtr GetWindowLongPtr(IntPtr h,int i);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr FindWindowEx(IntPtr p,IntPtr a,string c,string t);
  [DllImport("user32.dll")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int z,uint f);
+ public static uint ProcessId(IntPtr h){uint id;GetWindowThreadProcessId(h,out id);return id;}
 }
 '@
 function Await([scriptblock]$condition,[string]$failure){for($i=0;$i -lt 100;$i++){if(& $condition){return};Start-Sleep -Milliseconds 100};throw $failure}
@@ -90,14 +92,24 @@ try {
  ClickScreen 150 124
  foreach($char in 'TV_INPUT_OK'.ToCharArray()){[void](Send $pet 0x102 ([int]$char))}
  $edit=[AppCheck]::Next($appWindow,[IntPtr]::Zero)
- function HasInput {
+ function HasInput([string]$expected='TV_INPUT_OK') {
   $child=[IntPtr]::Zero
-  while(($child=[AppCheck]::Next($appWindow,$child)) -ne [IntPtr]::Zero){$text=New-Object Text.StringBuilder 512;[void][EmbeddedWin]::ReadText($child,0xD,[IntPtr]512,$text);if($text.ToString() -eq 'TV_INPUT_OK'){return $true}}
+  while(($child=[AppCheck]::Next($appWindow,$child)) -ne [IntPtr]::Zero){$text=New-Object Text.StringBuilder 512;[void][EmbeddedWin]::ReadText($child,0xD,[IntPtr]512,$text);if($text.ToString() -eq $expected){return $true}}
   return $false
  }
  Await {HasInput} 'Projected typing did not reach the app'
  ClickScreen 140 205
  Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Clicked'} 'Projected button click did not reach the app'
+ $expected='TV_INPUT_OK'
+ foreach($resolution in @(@(1,1280,720),@(2,1600,900))){
+  [void][EmbeddedWin]::SendMessage($hostWindow,0x801f,[IntPtr]($resolution[0] -shl 16),[IntPtr]15)
+  $bounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$bounds)
+  if($bounds.Right-$bounds.Left -ne $resolution[1] -or $bounds.Bottom-$bounds.Top -ne $resolution[2]){throw 'Independent application resolution was not applied'}
+  ClickScreen ([int](150*800/$resolution[1])) ([int](44+80*456/$resolution[2]))
+  [void](Send $pet 0x100 35);[void](Send $pet 0x101 35);[void](Send $pet 0x102 82);$expected+='R'
+  Await {HasInput $expected} 'Input mapping failed at higher application resolution'
+ }
+ [void][EmbeddedWin]::SendMessage($hostWindow,0x801f,[IntPtr]0,[IntPtr]15)
  $second=Start-Process -FilePath $fixture -PassThru
  Await {$script:secondWindow=[AppCheck]::Find($second.Id);$secondWindow -ne [IntPtr]::Zero} 'Second app missing'
  $secondBefore=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($secondWindow,[ref]$secondBefore);$secondStyle=[AppCheck]::GetWindowLongPtr($secondWindow,-16)
@@ -126,8 +138,49 @@ try {
  Stop-Process -Id $petId
  $pet=[IntPtr]::Zero
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Helper failed to restore after owner exit'
- @{shortcutArguments=$true;automaticAttachment=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
+ @{shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
  Get-Content (Join-Path $root 'output/app-workspace-checks.json')
+ if($Browser){
+  $browserPath=Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+  if(!(Test-Path -LiteralPath $browserPath)){throw 'Edge is required for the optional browser regression'}
+  $shortcutStore=Join-Path $env:LOCALAPPDATA 'PicoPet/shortcuts.ini'
+  $savedShortcuts=if(Test-Path -LiteralPath $shortcutStore){[IO.File]::ReadAllBytes($shortcutStore)}else{$null}
+  $browserWindow=[IntPtr]::Zero
+  try{
+   [IO.File]::WriteAllText($shortcutStore,"[Shortcuts]`r`ncount=1`r`nitem0=$browserPath`r`n",[Text.Encoding]::Unicode)
+   Start-Process -FilePath (Join-Path $root 'dist/PicoPet.exe') -WindowStyle Hidden
+   Await {$script:pet=[EmbeddedWin]::FindWindow('PicoPet.Win11.Native','PICO');$pet -ne [IntPtr]::Zero} 'Pet restart failed'
+   [void](Send $pet 0x111 210);[void](Send $pet 0x111 250);[void](Send $pet 0x111 106);[void](Send $pet 0x111 324)
+   [void][AppCheck]::SetWindowPos($pet,[IntPtr](-1),900,220,0,0,0x11)
+   $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r);$extent=$r.Right-$r.Left
+   $cx=[int]($extent*(.5+(120/800.0-.5)*83.6/120));$cy=[int]($extent*(.5+(44-(42.5+(.5-300/500.0)*47.6))/120))
+   [void][EmbeddedWin]::SetCursorPos(($r.Left+$cx),($r.Top+$cy));[void](Send $pet 0x200)
+   Start-Sleep -Milliseconds 300
+   $existing=Get-Process msedge -ErrorAction SilentlyContinue | Where-Object MainWindowHandle -ne 0 | Select-Object -ExpandProperty MainWindowHandle
+   ClickScreen 120 300
+   Await {(Send $pet 0x8003 82) -eq 1} 'Normal shortcut click did not automatically attach Edge'
+   $hostWindow=[IntPtr](Send $pet 0x8003 80);$browserWindow=[AppCheck]::Next($hostWindow,[IntPtr]::Zero)
+   if($browserWindow -eq [IntPtr]::Zero -or $existing -contains $browserWindow){throw 'Browser did not create a separate TV window'}
+   foreach($old in $existing){if([AppCheck]::GetParent($old) -ne [IntPtr]::Zero){throw 'Existing user browser window was unexpectedly attached'}}
+   Await {(Send $pet 0x8003 83) -gt 3} 'Browser capture missing'
+   [void](Send $pet 0x111 300)
+   Await {$script:prefs=[EmbeddedWin]::FindWindow('PicoPet.Preferences','PICO · 偏好设置');$prefs -ne [IntPtr]::Zero} 'Preferences missing'
+   foreach($resolution in @(@(1,1280,720),@(2,1600,900))){
+    [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1020)) 0x14e $resolution[0]);[void](Send $prefs 0x111 (1020 -bor (1 -shl 16)))
+    Await {$r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($browserWindow,[ref]$r);($r.Right-$r.Left -eq $resolution[1]) -and ($r.Bottom-$r.Top -eq $resolution[2])} 'Browser resolution did not update from settings'
+   }
+   [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1019)) 0x14e 1);[void](Send $prefs 0x111 (1019 -bor (1 -shl 16)))
+   if(!((Get-Content -LiteralPath $config) -contains 'shortcutTarget=1') -or !((Get-Content -LiteralPath $config) -contains 'appResolution=2')){throw 'Application preferences were not persisted'}
+   [void](Send $prefs 0x10)
+   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;processId=[AppCheck]::ProcessId($browserWindow)} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
+   Get-Content (Join-Path $root 'output/browser-workspace-checks.json')
+  }finally{
+   if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}
+   if($browserWindow -ne [IntPtr]::Zero){[void][AppCheck]::PostMessage($browserWindow,0x10,[IntPtr]0,[IntPtr]0)}
+   & (Join-Path $PSScriptRoot 'control.ps1') -Action Exit;$pet=[IntPtr]::Zero
+   if($null -ne $savedShortcuts){[IO.File]::WriteAllBytes($shortcutStore,$savedShortcuts)}else{Remove-Item -LiteralPath $shortcutStore -ErrorAction SilentlyContinue}
+  }
+ }
 } finally {
  if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}
  if($app -and !$app.HasExited){[void](Send ([AppCheck]::Find($app.Id)) 0x10)}
