@@ -2,10 +2,19 @@
 
 一个可拖拽、旋转和悬浮的 3D 电视桌宠，也是一组按需开启的本机工具。原生 C++20 / Win32 / Direct3D 11 实现，运行时不需要 Python、Node.js、Electron 或浏览器。
 
+## 下载与安装
+
+在 [GitHub Releases](https://github.com/none-pace/pico-pet/releases) 下载构建好的版本；标记为 Pre-release 的版本包含实验性电视应用功能，使用前可查看对应发布说明。
+
+- **安装版**：运行 `PICO-Setup.exe`，安装后重新打开 CMD，输入 `pet` 唤起。
+- **便携版**：完整解压 `PICO-Win11-x64.zip`，运行 `PicoPet.exe`；保留同目录的 `PicoPet.Input.dll`。
+- **校验**：发布附件 `SHA256SUMS.txt` 提供安装包和 ZIP 的 SHA-256。
+
 ## 功能
 
 - **电视桌宠**：LCD 屏幕、像素 / 高清显示、四种机身材质、惯性拖甩、可折叠天线、自定义图片表情。
 - **屏内桌面**：系统模块图标、自定义程序 / 文件 / 文件夹快捷方式、完整右键菜单和自动保存的偏好设置。
+- **电视应用**：兼容程序窗口嵌入 LCD，独立画布分辨率、屏内鼠标和键盘操作；红色按钮关闭应用后返回图标桌面。
 - **命令终端**：电视屏幕内操作 CMD；可启动本机已安装配置的终端工具。开启终端保留当前模型尺寸，滚轮控制缩放。
 - **性能与设备**：CPU、内存、进程资源、硬件分类、驱动版本；可合并同软件、排序、筛选和定格阅读。
 - **磁盘与快照**：目录浏览、文件元数据快照、断点续扫和差异比较。
@@ -57,7 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File native/package.ps1
 
 **电视应用画布分辨率**默认自动补偿系统 DPI，按完整 LCD 的 800:500 比例计算，宽度限制在 1280–1920；150% 缩放时为 1536×960。固定档位为 800×500、1280×800、1600×1000，即时保存。画布独立于 Windows 桌面分辨率，电视缩放不改变应用布局；最终采样纹理为 800×500。网页长内容仍保留正常滚动，全屏交给应用自身控制。
 
-这是同会话的窗口容器，不是完整虚拟系统或安全隔离。普通最大化限制在容器内，其他 GPU 界面、独占全屏和独立弹窗不保证兼容。退出、释放及桌宠主进程异常退出后，由辅助进程恢复窗口原父级、样式和位置。
+这是同会话的窗口容器，不是完整虚拟系统或安全隔离。普通最大化限制在容器内，其他 GPU 界面、独占全屏和独立弹窗不保证兼容。通过菜单释放窗口、退出桌宠或桌宠主进程异常退出时，由辅助进程恢复仍存活窗口的原父级、样式和位置；红色按钮执行的是关闭电视内应用。
 
 ## 数据与能力边界
 
@@ -79,6 +88,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File native/package.ps1
 | `native/src/system_*.cpp` | 性能、设备、网络、事件、日志、索引和系统窗口 |
 | `native/src/system_cards.h`、`system_presentation.h`、`system_observations.h` | 卡片交互、字段展示、历史与聚合 |
 | `native/src/embedded_console.*` | 屏内终端及进程生命周期 |
+| `native/src/app_workspace.*` | 电视应用容器、画面采集、输入投影和异步关闭 |
+| `native/src/app_input_hook.cpp` | 目标应用线程悬停兼容钩子，构建为 `PicoPet.Input.dll` |
 | `native/src/*_tests.h` | 内置回归检查，与功能模块对应 |
 | `native/tools/` | 检查、交互回归、性能测量和资源生成；公共界面测试代码集中在 `test_support.ps1` |
 | `native/assets/` | 编译时嵌入的模型、图标和贴图 |
@@ -94,4 +105,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File native/package.ps1
 5. 公共界面测试通过点导入 `test_support.ps1` 使用 Win32 辅助代码；不要截取其他测试脚本再 `Invoke-Expression`。
 6. 发布前从干净检出构建，检查必需资源完整；不要提交本机网络日志、磁盘索引、屏幕截图、账户配置或凭据。
 
-版本变化可通过 Git 历史查看。当前整理版本同时修复了开启终端强制将电视恢复到 640 尺寸的问题。
+版本变化见 [发布说明](https://github.com/none-pace/pico-pet/releases) 和 Git 历史；交互回归入口见 [原生应用说明](native/README.md#性能与开发)。
