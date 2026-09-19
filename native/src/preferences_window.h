@@ -21,7 +21,8 @@ class Window {
     bool loading=false;
     int dpi=96;
     std::vector<Field> fields;
-    std::array<std::vector<HWND>,4> pages;
+    std::array<std::vector<HWND>,5> pages;
+    std::vector<startup::Display> displays;
     std::vector<windowlayer::App> apps;
     int px(int value)const{return MulDiv(value,dpi,96);}
     HWND control(const wchar_t* type,const wchar_t* text,DWORD style,int x,int y,int w,int h,int id){
@@ -55,7 +56,14 @@ class Window {
         for(size_t i=0;i<fields.size();++i){const auto& f=fields[i];HWND c=GetDlgItem(hwnd,1000+static_cast<int>(i));
             if(f.choices.empty())SetWindowTextW(c,std::to_wstring(get(f)).c_str());
             else {int selected=0;for(size_t j=0;j<f.choices.size();++j)if(f.choices[j].second==get(f))selected=static_cast<int>(j);SendMessageW(c,CB_SETCURSEL,selected,0);}}
-        populateLayer();loading=false;
+        populateLayer();populateDisplays();loading=false;
+    }
+    void populateDisplays(){
+        HWND list=GetDlgItem(hwnd,930);SendMessageW(list,CB_RESETCONTENT,0,0);
+        SendMessageW(list,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"记住上次位置（默认）"));int selected=0;
+        for(size_t i=0;i<displays.size();++i){SendMessageW(list,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(displays[i].label.c_str()));if(displays[i].device==values.startupDisplay)selected=static_cast<int>(i)+1;}
+        if(!values.startupDisplay.empty() && !selected){const auto label=L"已断开 · "+values.startupDisplay+L"（启动时使用主屏）";selected=static_cast<int>(SendMessageW(list,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str())));}
+        SendMessageW(list,CB_SETCURSEL,selected,0);SendMessageW(list,CB_SETDROPPEDWIDTH,px(640),0);
     }
     bool commit(){
         if(loading)return true;
@@ -69,6 +77,8 @@ class Window {
             set(f,v);
         }
         values.layerMode=static_cast<int>(SendMessageW(GetDlgItem(hwnd,910),CB_GETCURSEL,0,0));
+        const auto display=SendMessageW(GetDlgItem(hwnd,930),CB_GETCURSEL,0,0);
+        if(display==0)values.startupDisplay.clear();else if(display>0 && static_cast<size_t>(display)<=displays.size())values.startupDisplay=displays[static_cast<size_t>(display)-1].device;
         const auto selected=SendMessageW(GetDlgItem(hwnd,911),CB_GETCURSEL,0,0);
         if(selected>0 && static_cast<size_t>(selected)<=apps.size()){
             const auto& app=apps[static_cast<size_t>(selected)-1];values.layerPath=app.path;values.layerPid=app.pid;
@@ -88,10 +98,11 @@ class Window {
                 else if(requested.*(f.number)!=previous.*(f.number))values.*(f.number)=requested.*(f.number);
             }
             if(requested.layerMode!=previous.layerMode)values.layerMode=requested.layerMode;
+            if(requested.startupDisplay!=previous.startupDisplay)values.startupDisplay=requested.startupDisplay;
             if(requested.layerPath!=previous.layerPath || requested.layerPid!=previous.layerPid){values.layerPath=requested.layerPath;values.layerPid=requested.layerPid;}
         }
-        const bool saved=apply(values);populate();
-        SetWindowTextW(status,saved?L"已生效并自动保存。":L"当前设置已生效，但保存失败。请检查配置目录权限。后续修改会重试。");
+        const bool saved=apply(values);if(readCurrent)values=readCurrent();populate();
+        SetWindowTextW(status,saved?L"已自动保存。启动显示器在下次启动时生效。":L"设置未能完整保存，请检查配置目录及当前用户启动项的写入权限。");
         return saved;
     }
     void create(){
@@ -118,13 +129,14 @@ class Window {
         number(L"应用画面上限（FPS，5–60）",&Settings::appFps,5,60);
         choice(L"快捷方式默认打开位置",&Settings::shortcutTarget,{{L"电视屏幕内（默认）",0},{L"Windows 桌面",1}});
         choice(L"电视应用画布分辨率",&Settings::appResolution,{{L"自动适配 · 屏幕比例与系统缩放",3},{L"800 × 500 · 大字 / 低占用",0},{L"1280 × 800 · 更多内容",1},{L"1600 × 1000 · 宽广视野",2}});
+        toggle(L"开机自启动（登录当前用户后）",&Settings::autoStart);
         HWND title=control(L"STATIC",L"偏好设置",0,24,18,650,28,0);SendMessageW(title,WM_SETFONT,reinterpret_cast<WPARAM>(titleFont),TRUE);
         INITCOMMONCONTROLSEX common{sizeof(common),ICC_TAB_CLASSES};InitCommonControlsEx(&common);
         HWND tabs=control(WC_TABCONTROLW,L"",WS_TABSTOP,24,58,656,30,903);
-        for(const auto* name:{L"外观与屏幕",L"窗口与层级",L"运动与性能",L"电视应用"}){TCITEMW tab{};tab.mask=TCIF_TEXT;tab.pszText=const_cast<wchar_t*>(name);TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&tab);}
+        for(const auto* name:{L"外观与屏幕",L"窗口与层级",L"运动与性能",L"电视应用",L"启动与显示器"}){TCITEMW tab{};tab.mask=TCIF_TEXT;tab.pszText=const_cast<wchar_t*>(name);TabCtrl_InsertItem(tabs,TabCtrl_GetItemCount(tabs),&tab);}
         loading=true;
-        std::array<int,4> counts{};
-        for(size_t i=0;i<fields.size();++i){const auto& f=fields[i];const int page=i>=17?3:i>=9?2:i>=4 && i<=6?1:0;
+        std::array<int,5> counts{};
+        for(size_t i=0;i<fields.size();++i){const auto& f=fields[i];const int page=i>=21?4:i>=17?3:i>=9?2:i>=4 && i<=6?1:0;
             const int slot=counts[page]++,col=slot/4,row=slot%4,x=24+col*348,y=116+row*(page==3?55:65);
             pages[page].push_back(control(L"STATIC",f.label,0,x,y,310,20,0));
             HWND c=control(f.choices.empty()?L"EDIT":L"COMBOBOX",L"",WS_TABSTOP|(f.choices.empty()?ES_AUTOHSCROLL:CBS_DROPDOWNLIST|WS_VSCROLL),x,y+21,310,f.choices.empty()?27:230,1000+static_cast<int>(i));
@@ -145,11 +157,15 @@ class Window {
         pages[3].push_back(control(L"BUTTON",L"接入已打开的窗口…",WS_TABSTOP|BS_PUSHBUTTON,372,162,240,30,921));
         pages[3].push_back(control(L"BUTTON",L"返回桌宠 · 恢复窗口",WS_TABSTOP|BS_PUSHBUTTON,372,208,240,30,922));
         pages[3].push_back(control(L"STATIC",L"程序独占电视画面，键盘焦点交给程序；屏内滚轮操作程序。\n机身滚轮缩放电视，机身右键或 Shift+右键管理窗口。",0,24,350,650,46,923));
+        pages[4].push_back(control(L"STATIC",L"启动显示器",0,24,192,620,20,0));
+        pages[4].push_back(control(L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,24,217,620,240,930));
+        pages[4].push_back(control(L"BUTTON",L"刷新显示器",WS_TABSTOP|BS_PUSHBUTTON,24,268,150,28,931));
+        pages[4].push_back(control(L"STATIC",L"选择屏幕 1、屏幕 2…，下次启动进入指定屏幕；未连接时回到主屏。\n默认记住上次位置。自启动仅作用于当前用户，可随时关闭。\n若 Windows 任务管理器禁用了启动项，请同时在那里启用。",0,24,320,650,68,932));
         status=control(L"STATIC",L"",0,24,400,650,40,900);
         control(L"BUTTON",L"关闭",BS_DEFPUSHBUTTON|WS_TABSTOP,584,450,96,28,IDCANCEL);
         pages[0].push_back(control(L"BUTTON",L"导入表情图片…",BS_PUSHBUTTON|WS_TABSTOP,24,450,180,28,901));
         pages[0].push_back(control(L"BUTTON",L"恢复内置表情",BS_PUSHBUTTON|WS_TABSTOP,218,450,160,28,902));
-        apps=windowlayer::applications();loading=false;showPage();
+        apps=windowlayer::applications();displays=startup::displays();loading=false;showPage();
     }
     static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
         auto* self=reinterpret_cast<Window*>(GetWindowLongPtrW(h,GWLP_USERDATA));
@@ -158,8 +174,11 @@ class Window {
         switch(m){
         case WM_CTLCOLORSTATIC:SetBkMode(reinterpret_cast<HDC>(w),TRANSPARENT);SetTextColor(reinterpret_cast<HDC>(w),RGB(35,43,48));return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
         case WM_TIMER:if(w==1){KillTimer(h,1);self->commit();return 0;}break;
+        case WM_DISPLAYCHANGE:self->displays=startup::displays();self->loading=true;self->populateDisplays();self->loading=false;return 0;
         case WM_NOTIFY:if(reinterpret_cast<NMHDR*>(l)->idFrom==903 && reinterpret_cast<NMHDR*>(l)->code==TCN_SELCHANGE){self->showPage();return 0;}break;
         case WM_COMMAND:
+            if(LOWORD(w)==931){self->displays=startup::displays();self->loading=true;self->populateDisplays();self->loading=false;return 0;}
+            if(LOWORD(w)==930 && HIWORD(w)==CBN_SELCHANGE && !self->loading){KillTimer(h,1);self->commit();return 0;}
             if(LOWORD(w)>=920 && LOWORD(w)<=922){PostMessageW(GetWindow(h,GW_OWNER),WM_COMMAND,LOWORD(w)==920?320:LOWORD(w)==921?321:323,0);return 0;}
             if(LOWORD(w)==912){const auto mode=SendMessageW(GetDlgItem(h,910),CB_GETCURSEL,0,0);self->apps=windowlayer::applications();self->loading=true;self->populateLayer();SendMessageW(GetDlgItem(h,910),CB_SETCURSEL,mode,0);EnableWindow(GetDlgItem(h,911),mode==1);EnableWindow(GetDlgItem(h,912),mode==1);self->loading=false;return 0;}
             if((LOWORD(w)==910 || LOWORD(w)==911) && HIWORD(w)==CBN_SELCHANGE && !self->loading){KillTimer(h,1);self->commit();return 0;}

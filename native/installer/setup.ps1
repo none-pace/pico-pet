@@ -72,6 +72,10 @@ try {
   if(!$state){throw '没有找到当前用户的 PICO 安装记录。'}
   if(!$Quiet -and (Dialog "卸载 PICO 桌宠和 pet 命令？`r`n桌宠设置及磁盘快照数据将保留。" -Confirm) -ne [Windows.Forms.DialogResult]::OK){exit 0}
   StopPet
+  $runKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+  $runValue=(Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue).'PicoPet.Win11'
+  $ownRun='"'+(Join-Path $installRoot 'PicoPet.exe')+'" --startup'
+  if($runValue -eq $ownRun){Remove-ItemProperty -Path $runKey -Name 'PicoPet.Win11'}
   if($state.pathAdded){
    $record=ReadUserPath;$userPath=$record.value
    $remaining=@($userPath -split ';' | Where-Object {!(PathMatches $_)}) -join ';'

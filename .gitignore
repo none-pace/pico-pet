@@ -32,6 +32,10 @@ settings*.ini
 !/native/assets/realtime-atlas.png
 !/native/assets/realtime-faces.png
 
+# Curated documentation screenshots are intentional repository assets.
+!/docs/media/*.png
+!/docs/media/*.gif
+
 # Reproducible model exports and previews
 /tv3d/*.glb
 /tv3d/*.png

@@ -40,6 +40,7 @@
 #include "custom_expression.h"
 #include "window_layer.h"
 #include "app_workspace.h"
+#include "startup.h"
 
 using Microsoft::WRL::ComPtr;
 constexpr wchar_t kClass[] = L"PicoPet.Win11.Native";
@@ -110,6 +111,8 @@ struct Settings {
     int layerMode=0;
     DWORD layerPid=0;
     std::wstring layerPath;
+    bool autoStart=false;
+    std::wstring startupDisplay;
 };
 
 #include "preferences_window.h"
@@ -358,6 +361,8 @@ public:
         settings.mood = std::clamp(get(L"mood", Idle), 0, static_cast<int>(Off));
         settings.x = get(L"x", INT_MIN); settings.y = get(L"y", INT_MIN);
         settings.topmost = get(L"topmost", 1) != 0;
+        settings.autoStart=startup::enabled();
+        wchar_t startupDisplay[128]{};GetPrivateProfileStringW(L"PICO",L"startupDisplay",L"",startupDisplay,128,configPath.c_str());settings.startupDisplay=startupDisplay;
         settings.layerMode=std::clamp(get(L"layerMode",0),0,1);
         settings.appMode=std::clamp(get(L"appMode",0),0,1);settings.appFps=std::clamp(get(L"appFps",60),5,60);
         if(get(L"appFrameVersion",0)<1 && settings.appFps==15)settings.appFps=60;
@@ -398,6 +403,7 @@ public:
         put(L"x", settings.x); put(L"y", settings.y); put(L"topmost", settings.topmost);
         put(L"clickThrough", settings.clickThrough); put(L"autoHide", settings.autoHide); put(L"economy", settings.economy);
         put(L"floating", settings.floating);
+        section+=L"startupDisplay=";section+=settings.startupDisplay;section.push_back(0);
         put(L"hd", settings.hd);
         put(L"frameRate",settings.frameRate);put(L"pixelThreshold",settings.pixelThreshold);
         put(L"material",settings.material);put(L"appMode",settings.appMode);put(L"appFps",settings.appFps);
@@ -504,6 +510,14 @@ public:
         const RECT area = workArea(cursor);
         const auto limits=movementBounds(area);
         place({limits.right-24, limits.bottom-12}, false);
+    }
+    void positionAtStartup(){
+        const auto displays=startup::displays();const auto* target=startup::select(displays,settings.startupDisplay);
+        const POINT saved{settings.x,settings.y};
+        if(target && !startup::contains(target->work,saved)){
+            const auto bounds=movementBounds(target->work);place({bounds.right-24,bounds.bottom-12},false);
+        }else if(settings.x==INT_MIN || settings.y==INT_MIN)resetPosition();
+        else place(saved,false);
     }
 
     void releaseSurface() {
@@ -1029,16 +1043,18 @@ public:
     }
 
     void openPreferences() {
+        if(!testMode)settings.autoStart=startup::enabled();
         Settings snapshot=settings;snapshot.pauseAnimation=paused;
         snapshot.yaw=static_cast<int>(std::lround(baseYaw*1000));snapshot.pitch=static_cast<int>(std::lround(basePitch*1000));
         preferencesWindow.open(hwnd,snapshot,[this](const Settings& next){
+            if(!testMode && next.autoStart!=settings.autoStart && !startup::setEnabled(next.autoStart))return false;
             const bool resized=next.size!=settings.size,qualityChanged=next.hd!=settings.hd;
             stopMotion();stopPose();settings=next;workspace.configure(settings.appMode,settings.appFps,settings.appResolution);paused=settings.pauseAnimation;resetOrientation();
             if(qualityChanged){for(auto& cached:poseCache)cached=CachedPose{};composition.clear();composedPose=composedFace=-1;}
             renderedFace=-1;
             if(resized){RECT r{};GetWindowRect(hwnd,&r);resizeSurface();place({r.left,r.top},false);}
             updateStyles();applyPolicy();return saveSettings();
-        },[this]{Settings current=settings;current.pauseAnimation=paused;current.yaw=static_cast<int>(std::lround(baseYaw*1000));current.pitch=static_cast<int>(std::lround(basePitch*1000));return current;});
+        },[this]{Settings current=settings;if(!testMode)current.autoStart=startup::enabled();current.pauseAnimation=paused;current.yaw=static_cast<int>(std::lround(baseYaw*1000));current.pitch=static_cast<int>(std::lround(basePitch*1000));return current;});
     }
 
     void configureExpression(UINT action){
@@ -1493,6 +1509,12 @@ int selfTest(Pet& pet, const std::filesystem::path& output) {
     std::vector<std::string> failures;
     int checks=0;
     auto check=[&](bool value,const char* label){++checks;if(!value)failures.emplace_back(label);};
+    const std::vector<startup::Display> startupDisplays={{L"display2",L"Secondary",{-1920,0,0,1040},false},{L"display1",L"Primary",{0,0,1920,1040},true}};
+    check(startup::select(startupDisplays,L"")==nullptr,"startup defaults to remembered position");
+    check(startup::select(startupDisplays,L"display2")==&startupDisplays[0],"startup selects secondary by device instead of enumeration order");
+    check(startup::select(startupDisplays,L"disconnected")==&startupDisplays[1],"disconnected startup display falls back to primary");
+    check(startup::select({},L"display1")==nullptr,"empty display enumeration handled");
+    check(startup::contains(startupDisplays[0].work,{-100,200}) && !startup::contains(startupDisplays[0].work,{0,200}),"startup supports negative monitor coordinates and exclusive bounds");
     testInteractions(check);
     const auto rendererBenchmark=pixels::testRenderer(check);
     check(pet.extent>=160 && pet.dib,"surface created");
@@ -1823,13 +1845,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     if(argc>=3 && wcscmp(argv[1],L"--app-host")==0){const std::wstring mapping=argv[2];LocalFree(argv);return appworkspace::runHost(mapping.c_str());}
     const bool testing=argc>=2 && wcscmp(argv[1],L"--self-test")==0;
     const bool systemTesting=argc>=2 && wcscmp(argv[1],L"--system-test")==0;
+    const bool startupLaunch=argc>=2 && wcscmp(argv[1],L"--startup")==0;
     std::filesystem::path report=argc>=3 ? argv[2] : L"self-test.json";
     LocalFree(argv);
     if(systemTesting)return systemdesk::selfTest(report);
     HANDLE mutex=CreateMutexW(nullptr,FALSE,testing ? L"Local\\PicoPet.Win11.Tests" : L"Local\\PicoPet.Win11.Instance");
     if(!mutex)return 1;
     if(GetLastError()==ERROR_ALREADY_EXISTS){
-        if(HWND previous=FindWindowW(kClass,nullptr)){PostMessageW(previous,WM_COMMAND,ResetPosition,0);}
+        if(!startupLaunch)if(HWND previous=FindWindowW(kClass,nullptr)){PostMessageW(previous,WM_COMMAND,ResetPosition,0);}
         CloseHandle(mutex);return 0;
     }
     const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -1847,13 +1870,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         type.hInstance=instance;type.hCursor=LoadCursorW(nullptr,IDC_ARROW);
         type.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101));type.lpszClassName=kClass;
         if(!RegisterClassExW(&type))throw std::runtime_error("Register window class");
+        const auto displays=startup::displays();const auto* startupDisplay=startup::select(displays,pet.settings.startupDisplay);
+        const POINT start=startupDisplay?POINT{startupDisplay->work.left,startupDisplay->work.top}:POINT{pet.settings.x==INT_MIN?0:pet.settings.x,pet.settings.y==INT_MIN?0:pet.settings.y};
         HWND hwnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,kClass,L"PICO",WS_POPUP,
-            0,0,192,192,nullptr,nullptr,instance,&pet);
+            start.x,start.y,192,192,nullptr,nullptr,instance,&pet);
         if(!hwnd)throw std::runtime_error("Create desktop window");
         if(pet.model.ready())pet.model.enableAsync(hwnd,kRenderReadyMessage);
         pet.resizeSurface();pet.updateStyles();
-        if(pet.settings.x==INT_MIN || pet.settings.y==INT_MIN)pet.resetPosition();
-        else pet.place({pet.settings.x,pet.settings.y},false);
+        pet.positionAtStartup();
         pet.addTray();
         if(!testing) {
             WTSRegisterSessionNotification(hwnd,NOTIFY_FOR_THIS_SESSION);
