@@ -981,7 +981,6 @@ public:
         workspace.close();KillTimer(hwnd,9);appPointerDown=false;if(GetCapture()==hwnd)ReleaseCapture();terminalDirty=true;renderedFace=-1;updateStyles();applyPolicy();
     }
     void workspaceTick(){
-        if((hidden || paused) && !workspace.exiting())return;
         const bool exiting=workspace.exiting();workspace.tick();
         if(exiting && !workspace.active()){closeWorkspace();desktopPinned=true;screenDesktop.dirty=true;if(!hidden)render(Computer,0);return;}
         if(workspace.updated() && !hidden){terminalDirty=true;renderedFace=-1;render(ComputerDiagnostics,0);}

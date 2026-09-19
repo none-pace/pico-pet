@@ -54,7 +54,7 @@ using System;using System.Windows.Forms;using System.Drawing;
 public class FixtureForm:Form {
  public readonly Timer Animation=new Timer{Interval=16};int tick;bool refuse;
  public FixtureForm(){Animation.Tick+=(s,e)=>{BackColor=Color.FromArgb(32+(tick++%40),92,126);Invalidate();};}
- protected override void WndProc(ref Message m){if(m.Msg==0x805e)new System.Threading.Thread(()=>System.Threading.Thread.Sleep(60000)).Start();if(m.Msg==0x805c){System.Threading.Thread.Sleep(60000);return;}if(m.Msg==0x805d)refuse=m.WParam!=IntPtr.Zero;if(m.Msg==0x10 && refuse)return;if(m.Msg==0x805a)Animation.Start();if(m.Msg==0x805b)Animation.Stop();base.WndProc(ref m);}
+ protected override void WndProc(ref Message m){if(m.Msg==0x805f){Bounds=new Rectangle(320,170,430,290);return;}if(m.Msg==0x805e)new System.Threading.Thread(()=>System.Threading.Thread.Sleep(60000)).Start();if(m.Msg==0x805c){System.Threading.Thread.Sleep(60000);return;}if(m.Msg==0x805d)refuse=m.WParam!=IntPtr.Zero;if(m.Msg==0x10 && refuse)return;if(m.Msg==0x805a)Animation.Start();if(m.Msg==0x805b)Animation.Stop();base.WndProc(ref m);}
 }
 public class WheelPanel:Panel {
  protected override void WndProc(ref Message m){if(m.Msg==0x20a || m.Msg==0x20e)Parent.Text="PICO Application Wheel "+m.Msg+" "+unchecked((short)((m.WParam.ToInt64()>>16)&65535));base.WndProc(ref m);}
@@ -105,6 +105,11 @@ try {
  $hostWindow=[IntPtr](Send $pet 0x8003 80)
  if([AppCheck]::GetParent($appWindow) -ne $hostWindow){throw 'App is not a child of the container'}
  Await {(Send $pet 0x8003 83) -gt $frames} 'No captured application frames'
+ [void](Send $appWindow 0x805f)
+ $sourceBounds=New-Object EmbeddedWin+RECT;$containerBounds=New-Object EmbeddedWin+RECT
+ [void][EmbeddedWin]::GetWindowRect($appWindow,[ref]$sourceBounds);[void][EmbeddedWin]::GetWindowRect($hostWindow,[ref]$containerBounds)
+ if($sourceBounds.Left -ne $containerBounds.Left -or $sourceBounds.Top -ne $containerBounds.Top -or $sourceBounds.Right-$sourceBounds.Left -ne 800 -or $sourceBounds.Bottom-$sourceBounds.Top -ne 500){throw ('Late placement: '+$sourceBounds.Left+','+$sourceBounds.Top+','+$sourceBounds.Right+','+$sourceBounds.Bottom+' host '+$containerBounds.Left+','+$containerBounds.Top+' fill='+[AppCheck]::GetProp($appWindow,'PicoPet.FillCanvas'))}
+
  Start-Sleep -Milliseconds 600
  Write-Host "Render frames $(Send $pet 0x8003 0); state $(Send $pet 0x8003 2); app frames $(Send $pet 0x8003 83)"
  $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r)
@@ -115,6 +120,7 @@ try {
   $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r);$extent=$r.Right-$r.Left
   $worldX=($x/800.0-.5)*83.6;$worldY=42.5+(.5-$y/500.0)*47.6
   $cx=[int]($extent*(.5+$worldX/120));$cy=[int]($extent*(.5+(44-$worldY)/120));$coord=[IntPtr](($cy -shl 16) -bor ($cx -band 0xffff))
+  [void][EmbeddedWin]::SetCursorPos(($r.Left+$cx),($r.Top+$cy));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,$coord)
   [void][EmbeddedWin]::SendMessage($pet,0x201,[IntPtr]1,$coord);[void][EmbeddedWin]::SendMessage($pet,0x202,[IntPtr]0,$coord)
  }
  ClickScreen 150 80
@@ -192,7 +198,11 @@ try {
   $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r)
   [void][EmbeddedWin]::SetCursorPos(($r.Left+($buttonPoint.ToInt64() -band 65535)),($r.Top+($buttonPoint.ToInt64() -shr 16)))
   [void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,$buttonPoint)
-  if((Send $pet 0x8003 27) -ne 1){throw 'Red button hover did not reach the model'}
+  if((Send $pet 0x8003 27) -ne 1){
+   $extent=$r.Right-$r.Left;$buttonPoint=$null
+   for($y=[int]($extent*.71);$y -lt $extent*.78 -and !$buttonPoint;$y+=3){for($x=[int]($extent*.75);$x -lt $extent*.82;$x+=3){[void][EmbeddedWin]::SetCursorPos(($r.Left+$x),($r.Top+$y));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,[IntPtr](($y -shl 16) -bor $x));if((Send $pet 0x8003 27) -eq 1){$buttonPoint=[IntPtr](($y -shl 16) -bor $x);break}}}
+   if(!$buttonPoint){throw 'Red button hover did not reach the model'}
+  }
   [void][EmbeddedWin]::SendMessage($pet,0x201,[IntPtr]1,$buttonPoint);[void][EmbeddedWin]::SendMessage($pet,0x202,[IntPtr]0,$buttonPoint)
  }
  [void][EmbeddedWin]::SendMessage($pet,0x8003,[IntPtr]81,$secondWindow)
@@ -236,7 +246,7 @@ try {
  Stop-Process -Id $petId
  $pet=[IntPtr]::Zero
  Await {[AppCheck]::GetParent($appWindow) -eq [IntPtr]::Zero} 'Helper failed to restore after owner exit'
- @{stableHover=$true;realLeave=$true;physicalReturn=$true;processExit=$true;windowlessProcessExit=$true;hungAppExit=$true;closeTransition=$true;repeatClose=$true;cancelClosePreserved=$true;nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
+ @{stableHover=$true;realLeave=$true;lateWindowPlacement=$true;physicalReturn=$true;processExit=$true;windowlessProcessExit=$true;hungAppExit=$true;closeTransition=$true;repeatClose=$true;cancelClosePreserved=$true;nativeFocus=$true;wheelDelta=$true;applicationFps=$actualFps;shortcutArguments=$true;automaticAttachment=$true;independentResolution=$true;scaledInput=$true;capture=$true;projectedInput=$true;buttonClick=$true;multipleWindows=$true;twoModes=$true;containedMaximize=$true;restored=$true;crashRecovery=$true}|ConvertTo-Json|Set-Content (Join-Path $root 'output/app-workspace-checks.json')
  Get-Content (Join-Path $root 'output/app-workspace-checks.json')
  if($Browser){
   $browserPath=Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
@@ -272,6 +282,7 @@ try {
    try{$graphics.CopyFromScreen($r.Left,$r.Top,0,0,$bitmap.Size);$bitmap.Save((Join-Path $root 'output/browser-auto-fit.png'))}finally{$graphics.Dispose();$bitmap.Dispose()}
    ClickScreen 722 45
    Await {$script:popup=[AppCheck]::Popup($hostWindow);$popup -ne [IntPtr]::Zero} 'Browser menu was not associated with the TV'
+   [void][AppCheck]::SetWindowPos($popup,[IntPtr]::Zero,200,200,0,0,0x15)
    $popupBounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($popup,[ref]$popupBounds)
    $hostBounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($hostWindow,[ref]$hostBounds)
    if($popupBounds.Left -lt $hostBounds.Left -or $popupBounds.Right -gt $hostBounds.Right){throw 'Browser menu escaped the TV source canvas'}
@@ -297,7 +308,31 @@ try {
    Await {(Send $pet 0x8003 80) -eq 0} 'Browser red-button close did not return'
    Await {[AppCheck]::ProcessId($browserWindow) -ne $browserPid} 'TV browser window was not closed'
    foreach($old in $existing){if([AppCheck]::ProcessId($old) -eq 0 -or [AppCheck]::GetParent($old) -ne [IntPtr]::Zero){throw 'Red button damaged an existing desktop browser window'}}
-   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;popupContained=$true;popupSettingsClick=$true;browserClose=$true;processId=$browserPid} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
+   [void](Send $pet 0x111 300);$prefs=[EmbeddedWin]::FindClass('PicoPet.Preferences')
+   [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1019)) 0x14e 0);[void](Send $prefs 0x111 (1019 -bor (1 -shl 16)))
+   [void](Send ([EmbeddedWin]::GetDlgItem($prefs,1020)) 0x14e 0);[void](Send $prefs 0x111 (1020 -bor (1 -shl 16)));[void](Send $prefs 0x10)
+   Add-Type -AssemblyName System.Windows.Forms
+   $screens=[Windows.Forms.Screen]::AllScreens
+   for($cycle=0;$cycle -lt 3;$cycle++){
+    if($screens.Count -gt 1 -and $cycle -eq 1){$secondary=$screens | Where-Object {!$_.Primary} | Select-Object -First 1;[void][AppCheck]::SetWindowPos($pet,[IntPtr](-1),($secondary.WorkingArea.Left+60),($secondary.WorkingArea.Top+20),0,0,0x11)}
+    ClickScreen 120 300
+    if($cycle -eq 0){[void](Send $pet 0x111 100)}
+    Await {(Send $pet 0x8003 82) -eq 1} "Browser reopen $cycle failed"
+    if($cycle -eq 0){[void](Send $pet 0x111 100)}
+    $hostWindow=[IntPtr](Send $pet 0x8003 80);$browserWindow=[AppCheck]::Next($hostWindow,[IntPtr]::Zero)
+    Start-Sleep -Milliseconds 700
+    ClickScreen 722 45
+    Await {$script:popup=[AppCheck]::Popup($hostWindow);$popup -ne [IntPtr]::Zero} "Reopened browser menu $cycle escaped"
+    $popupBounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($popup,[ref]$popupBounds)
+    $hostBounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($hostWindow,[ref]$hostBounds)
+    if($popupBounds.Right -gt $hostBounds.Right){throw 'Reopened popup leaked onto desktop'}
+    [void][AppCheck]::PostMessage($browserWindow,0x100,[IntPtr]27,[IntPtr]1)
+    [void][AppCheck]::PostMessage($browserWindow,0x101,[IntPtr]27,[IntPtr]1)
+    Await {[AppCheck]::Popup($hostWindow) -eq [IntPtr]::Zero} 'Reopened menu did not dismiss'
+    RedButton
+    Await {(Send $pet 0x8003 80) -eq 0} 'Reopened browser did not close'
+   }
+   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;hiddenLaunch=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;popupContained=$true;popupSettingsClick=$true;reopenCycles=3;browserClose=$true;processId=$browserPid} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
    Get-Content (Join-Path $root 'output/browser-workspace-checks.json')
   }finally{
    if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}

@@ -219,7 +219,7 @@ struct Host {
     void restore(Entry& e){
         DWORD pid=0;GetWindowThreadProcessId(e.window,&pid);if(!IsWindow(e.window) || pid!=e.pid)return;
         for(HWND popup:popupWindows(window)){RemovePropW(popup,L"PicoPet.PopupHost");PostMessageW(popup,WM_CLOSE,0,0);}
-        RemovePropW(e.window,L"PicoPet.ApplicationHost");PostMessageW(e.window,WM_CANCELMODE,0,0);
+        RemovePropW(e.window,L"PicoPet.FillCanvas");RemovePropW(e.window,L"PicoPet.ApplicationHost");PostMessageW(e.window,WM_CANCELMODE,0,0);
         SetParent(e.window,e.parent);SetWindowLongPtrW(e.window,GWL_STYLE,e.style);SetWindowLongPtrW(e.window,GWL_EXSTYLE,e.exstyle);
         if(!e.parent)SetWindowLongPtrW(e.window,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(IsWindow(e.owner)?e.owner:nullptr));
         SetWindowPos(e.window,nullptr,e.rect.left,e.rect.top,e.rect.right-e.rect.left,e.rect.bottom-e.rect.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED);
@@ -229,7 +229,14 @@ struct Host {
     bool hookThread(HWND target){
         const DWORD thread=GetWindowThreadProcessId(target,nullptr);
         if(std::none_of(inputHooks.begin(),inputHooks.end(),[thread](const InputHook& hook){return hook.thread==thread;})){
-            if(!inputModule){wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);const auto library=std::filesystem::path(path).parent_path()/L"PicoPet.Input.dll";inputModule=LoadLibraryW(library.c_str());if(inputModule){inputProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppInputMessage"));windowProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppWindowMessage"));}}
+            if(!inputModule){wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);const auto library=std::filesystem::path(path).parent_path()/L"PicoPet.Input.dll";WIN32_FILE_ATTRIBUTE_DATA attributes{};wchar_t temporary[32768]{};
+                if(GetFileAttributesExW(library.c_str(),GetFileExInfoStandard,&attributes) && GetTempPathW(32768,temporary)){
+                    const auto stamp=(static_cast<unsigned long long>(attributes.ftLastWriteTime.dwHighDateTime)<<32)|attributes.ftLastWriteTime.dwLowDateTime;
+                    const auto cache=std::filesystem::path(temporary)/L"PicoPet.Input";std::error_code error;std::filesystem::create_directories(cache,error);
+                    const auto version=cache/(L"Input-"+std::to_wstring(stamp)+L".dll");
+                    if(CopyFileW(library.c_str(),version.c_str(),TRUE) || GetLastError()==ERROR_FILE_EXISTS)inputModule=LoadLibraryW(version.c_str());
+                }
+                if(inputModule){inputProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppInputMessage"));windowProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppWindowMessage"));}}
             HHOOK hook=inputProc?SetWindowsHookExW(WH_GETMESSAGE,inputProc,inputModule,thread):nullptr;
             if(!hook)return false;HHOOK windowHook=windowProc?SetWindowsHookExW(WH_CALLWNDPROC,windowProc,inputModule,thread):nullptr;inputHooks.push_back({thread,hook,windowHook});
         }
@@ -244,6 +251,7 @@ struct Host {
     }
     void release(){capture.stop();clearHover();for(HWND popup:popupWindows(window)){RemovePropW(popup,L"PicoPet.PopupHost");PostMessageW(popup,WM_CLOSE,0,0);}for(auto& hook:inputHooks){UnhookWindowsHookEx(hook.hook);if(hook.windowHook)UnhookWindowsHookEx(hook.windowHook);}inputHooks.clear();pointerCapture=nullptr;for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
     bool ownedPopup(HWND popup)const{
+        if(std::any_of(entries.begin(),entries.end(),[popup](const Entry& e){return e.window==popup;}))return false;
         const auto style=GetWindowLongPtrW(popup,GWL_STYLE);
         if(!IsWindow(popup) || !(style&WS_POPUP) || (style&(WS_CHILD|WS_CAPTION)))return false;
         DWORD popupPid=0;GetWindowThreadProcessId(popup,&popupPid);
@@ -296,6 +304,7 @@ struct Host {
         const int hostWidth=browser?SourceWidth:width,hostHeight=browser?SourceHeight:height;
         SetWindowPos(window,nullptr,GetSystemMetrics(SM_XVIRTUALSCREEN)-hostWidth-32,GetSystemMetrics(SM_YVIRTUALSCREEN),hostWidth,hostHeight,SWP_NOZORDER|SWP_NOACTIVATE);
         for(size_t i=0;i<entries.size();++i){auto& e=entries[i];if(!IsWindow(e.window))continue;
+            if(mode==0 && !immersive)SetPropW(e.window,L"PicoPet.FillCanvas",reinterpret_cast<HANDLE>(1));else RemovePropW(e.window,L"PicoPet.FillCanvas");
             const bool single=mode==0 || immersive;const LONG_PTR style=(e.style&~(WS_POPUP|WS_MINIMIZE|WS_MAXIMIZE))|WS_CHILD;
             SetWindowLongPtrW(e.window,GWL_STYLE,single?style&~(WS_CAPTION|WS_THICKFRAME):style);
             const int offset=static_cast<int>(i%5)*24;
@@ -422,7 +431,7 @@ int runHost(const wchar_t* mappingName){
 struct Workspace::Impl {
     std::unique_ptr<Link> link;HANDLE process=nullptr;HWND owner=nullptr;bool immersive=false,paused=false,dirty=true;LONG generation=-1;
     int mode=0,fps=60,windows=0;uint64_t frameCount=0;std::wstring message=L"正在启动应用容器…";
-    DWORD launchedPid=0;ULONGLONG launchDeadline=0,launchChecked=0;std::vector<HWND> beforeLaunch;std::wstring browserPath;
+    DWORD launchedPid=0;ULONGLONG launchDeadline=0,launchChecked=0;std::vector<HWND> beforeLaunch;std::wstring browserPath;HWND pendingAttach=nullptr;DWORD pendingPid=0;ULONGLONG attachSent=0;
     std::array<uint32_t,Width*Height> pixels{};HFONT font=nullptr;POINT pointer{};bool pointerDown=false;
     std::shared_ptr<Shutdown> shutdown;ULONGLONG exitBegan=0,hostExitBegan=0,noticeUntil=0;
     ~Impl(){if(font)DeleteObject(font);if(process)CloseHandle(process);}
@@ -469,9 +478,10 @@ void Workspace::launch(){
 }
 bool Workspace::launchPath(const std::wstring& path){
     if(exiting())return false;
+    if(impl->launchDeadline)return true;
     const auto target=launchTarget(path);impl->browserPath=target.browser?target.executable:L"";
-    impl->launchDeadline=0;impl->launchChecked=0;impl->launchedPid=0;
-    impl->beforeLaunch.clear();EnumWindows([](HWND h,LPARAM data)->BOOL{reinterpret_cast<std::vector<HWND>*>(data)->push_back(h);return TRUE;},reinterpret_cast<LPARAM>(&impl->beforeLaunch));
+    impl->launchDeadline=0;impl->launchChecked=0;impl->launchedPid=0;impl->pendingAttach=nullptr;impl->attachSent=0;
+    impl->beforeLaunch.clear();EnumWindows([](HWND h,LPARAM data)->BOOL{if(IsWindowVisible(h))reinterpret_cast<std::vector<HWND>*>(data)->push_back(h);return TRUE;},reinterpret_cast<LPARAM>(&impl->beforeLaunch));
     SHELLEXECUTEINFOW info{sizeof(info)};info.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_FLAG_NO_UI|SEE_MASK_NOASYNC;info.hwnd=impl->owner;info.lpVerb=L"open";info.lpFile=path.c_str();info.nShow=SW_SHOWNORMAL;
     if(target.browser){info.lpFile=target.executable.c_str();info.lpParameters=target.arguments.c_str();if(!target.directory.empty())info.lpDirectory=target.directory.c_str();}
     if(!ShellExecuteExW(&info)){const auto message=L"无法启动该快捷方式。Windows 错误："+std::to_wstring(GetLastError());MessageBoxW(impl->owner,message.c_str(),L"电视应用",MB_OK|MB_ICONWARNING);return false;}
@@ -525,13 +535,20 @@ void Workspace::tick(){
     if(WaitForSingleObject(impl->process,0)==WAIT_OBJECT_0){if(impl->message!=L"应用容器已停止，请返回后重试"){impl->message=L"应用容器已停止，请返回后重试";impl->dirty=true;}return;}
     if(impl->launchDeadline && host() && GetTickCount64()-impl->launchChecked>=100){
         impl->launchChecked=GetTickCount64();
-        if(GetTickCount64()>impl->launchDeadline){impl->launchDeadline=0;impl->message=L"程序已启动，但未找到可确认的新窗口。请从机身右键菜单接入。";impl->dirty=true;}
-        else if(impl->launchedPid || !impl->browserPath.empty()){struct Search{Impl* impl;HWND found=nullptr;} search{impl.get()};
+        if(impl->pendingAttach){
+            DWORD pid=0;GetWindowThreadProcessId(impl->pendingAttach,&pid);
+            if(pid==impl->pendingPid && GetParent(impl->pendingAttach)==host() && GetPropW(impl->pendingAttach,L"PicoPet.ApplicationHost")==host()){
+                impl->pendingAttach=nullptr;impl->launchDeadline=0;
+            }else if(!IsWindow(impl->pendingAttach) || pid!=impl->pendingPid)impl->pendingAttach=nullptr;
+            else if(GetTickCount64()-impl->attachSent>=500){attach(impl->pendingAttach);impl->attachSent=GetTickCount64();}
+        }
+        if(impl->launchDeadline && GetTickCount64()>impl->launchDeadline){impl->launchDeadline=0;impl->pendingAttach=nullptr;impl->message=L"程序已启动，但未完成窗口接入。请从机身右键菜单重试。";impl->dirty=true;}
+        else if(impl->launchDeadline && !impl->pendingAttach && (impl->launchedPid || !impl->browserPath.empty())){struct Search{Impl* impl;HWND found=nullptr;} search{impl.get()};
             EnumWindows([](HWND h,LPARAM data)->BOOL{auto& search=*reinterpret_cast<Search*>(data);DWORD pid=0;GetWindowThreadProcessId(h,&pid);
                 if(!windowlayer::taskbarWindow(h) || std::find(search.impl->beforeLaunch.begin(),search.impl->beforeLaunch.end(),h)!=search.impl->beforeLaunch.end())return TRUE;
                 const bool matches=search.impl->browserPath.empty()?pid==search.impl->launchedPid:chromium(h) && windowlayer::samePath(windowlayer::processPath(pid),search.impl->browserPath);
                 if(matches){search.found=h;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&search));
-            if(search.found){attach(search.found);impl->launchDeadline=0;}
+            if(search.found && attach(search.found)){impl->pendingAttach=search.found;GetWindowThreadProcessId(search.found,&impl->pendingPid);impl->attachSent=GetTickCount64();}
         }
     }
     if(impl->link->lock()){
