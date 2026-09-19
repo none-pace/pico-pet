@@ -4,6 +4,11 @@ $ErrorActionPreference='Stop'
 Add-Type @'
 using System;using System.Runtime.InteropServices;using System.Text;
 public static class AppCheck {
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr GetProp(IntPtr h,string name);
+ [DllImport("user32.dll")]static extern bool IsWindowVisible(IntPtr h);
+ [DllImport("user32.dll")]static extern IntPtr GetWindow(IntPtr h,uint c);
+
+ public static IntPtr Popup(IntPtr host){IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{if(IsWindowVisible(h)&&GetProp(h,"PicoPet.PopupHost")==host){found=h;return false;}return true;},IntPtr.Zero);return found;}
  [DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
  [DllImport("user32.dll")]static extern IntPtr SendMessageTimeout(IntPtr h,uint m,IntPtr w,IntPtr l,uint flags,uint timeout,out IntPtr result);
  public static bool Responsive(IntPtr h){IntPtr result;return SendMessageTimeout(h,0x8003,new IntPtr(84),IntPtr.Zero,3,500,out result)!=IntPtr.Zero;}
@@ -126,7 +131,7 @@ try {
  $hoverX=[int]($extent*(.5+(140/800.0-.5)*83.6/120));$hoverY=[int]($extent*(.5+(44-(42.5+(.5-160/500.0)*47.6))/120));$hoverPoint=[IntPtr](($hoverY -shl 16) -bor $hoverX)
  [void][EmbeddedWin]::SetCursorPos(($r.Left+$hoverX),($r.Top+$hoverY));[void][EmbeddedWin]::SendMessage($pet,0x200,[IntPtr]0,$hoverPoint)
  Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Hover'} 'Application hover did not enter'
- for($sample=0;$sample -lt 20;$sample++){Start-Sleep -Milliseconds 100;if([AppCheck]::Title($appWindow) -ne 'PICO Application Hover'){throw 'Stationary hover was lost'}}
+ for($sample=0;$sample -lt 20;$sample++){Start-Sleep -Milliseconds 100;if([AppCheck]::Title($appWindow) -ne 'PICO Application Hover'){throw ('Stationary hover was lost: '+[AppCheck]::Title($appWindow))}}
  [void](Send $pet 0x2a3)
  Await {[AppCheck]::Title($appWindow) -eq 'PICO Application Left'} 'Real pointer leave did not clear hover'
  ClickScreen 140 160
@@ -265,6 +270,16 @@ try {
    $r=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($pet,[ref]$r)
    $bitmap=New-Object Drawing.Bitmap ($r.Right-$r.Left),($r.Bottom-$r.Top);$graphics=[Drawing.Graphics]::FromImage($bitmap)
    try{$graphics.CopyFromScreen($r.Left,$r.Top,0,0,$bitmap.Size);$bitmap.Save((Join-Path $root 'output/browser-auto-fit.png'))}finally{$graphics.Dispose();$bitmap.Dispose()}
+   ClickScreen 722 45
+   Await {$script:popup=[AppCheck]::Popup($hostWindow);$popup -ne [IntPtr]::Zero} 'Browser menu was not associated with the TV'
+   $popupBounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($popup,[ref]$popupBounds)
+   $hostBounds=New-Object EmbeddedWin+RECT;[void][EmbeddedWin]::GetWindowRect($hostWindow,[ref]$hostBounds)
+   if($popupBounds.Left -lt $hostBounds.Left -or $popupBounds.Right -gt $hostBounds.Right){throw 'Browser menu escaped the TV source canvas'}
+   Start-Sleep -Milliseconds 600
+   [void](Send $pet 0x8003 41);Copy-Item -LiteralPath (Join-Path $env:TEMP 'pico-render.bmp') -Destination (Join-Path $root 'output/browser-popup.bmp') -Force
+   ClickScreen 600 412
+   Await {[AppCheck]::Popup($hostWindow) -eq [IntPtr]::Zero} 'Projected settings click did not close menu'
+   Await {[AppCheck]::Title($browserWindow) -match '设置|Settings'} 'Projected menu click did not open Edge settings'
    [void](Send $pet 0x111 328)
    Await {$c=[AppCheck]::Content($browserWindow);[Math]::Abs(($c.Right-$c.Left)-$autoWidth) -le 2 -and [Math]::Abs(($c.Bottom-$c.Top)-$autoHeight) -le 2} 'Fullscreen browser viewport does not match TV aspect and resolution'
    [void](Send $pet 0x111 328)
@@ -282,7 +297,7 @@ try {
    Await {(Send $pet 0x8003 80) -eq 0} 'Browser red-button close did not return'
    Await {[AppCheck]::ProcessId($browserWindow) -ne $browserPid} 'TV browser window was not closed'
    foreach($old in $existing){if([AppCheck]::ProcessId($old) -eq 0 -or [AppCheck]::GetParent($old) -ne [IntPtr]::Zero){throw 'Red button damaged an existing desktop browser window'}}
-   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;browserClose=$true;processId=$browserPid} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
+   @{normalShortcutClick=$true;automaticBrowserAttachment=$true;automaticDpiCanvas=$true;fullscreenViewportFits=$true;existingWindowsPreserved=$true;resolutionSettings=$true;preferencesSaved=$true;popupContained=$true;popupSettingsClick=$true;browserClose=$true;processId=$browserPid} | ConvertTo-Json | Set-Content (Join-Path $root 'output/browser-workspace-checks.json')
    Get-Content (Join-Path $root 'output/browser-workspace-checks.json')
   }finally{
    if($pet -ne [IntPtr]::Zero){[void](Send $pet 0x111 323)}

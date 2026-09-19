@@ -24,7 +24,7 @@ SIZE canvas(int resolution,UINT dpi=96){
     const int width=resolution==3?std::clamp(MulDiv(1024,static_cast<int>(dpi?dpi:96),96),1280,1920):resolution==2?1600:resolution==1?1280:Width;
     return {width,MulDiv(width,Height,Width)};
 }
-constexpr UINT Attach=WM_APP+30,Configure=WM_APP+31,Release=WM_APP+32,Pointer=WM_APP+33,Keyboard=WM_APP+34,Paused=WM_APP+35,Cycle=WM_APP+36,Immersive=WM_APP+37;
+constexpr UINT Attach=WM_APP+30,Configure=WM_APP+31,Release=WM_APP+32,Pointer=WM_APP+33,Keyboard=WM_APP+34,Paused=WM_APP+35,Cycle=WM_APP+36,Immersive=WM_APP+37,PopupChanged=WM_APP+38;
 struct Shared {
     DWORD parent=0;HWND owner=nullptr,host=nullptr;
     LONG generation=0,count=0,mode=0,fps=60,closing=0,resolution=0,framePending=0,quitting=0;
@@ -68,6 +68,20 @@ RECT contentRect(HWND window){
         if(wcscmp(name,L"Chrome_RenderWidgetHostHWND")==0 && IsWindowVisible(child)){RECT r{},outer{};GetWindowRect(child,&r);GetWindowRect(search.root,&outer);OffsetRect(&r,-outer.left,-outer.top);if(r.right-r.left>100 && r.bottom-r.top>100){search.rect=r;search.found=true;return FALSE;}}return TRUE;},reinterpret_cast<LPARAM>(&search));
     return search.found?search.rect:result;
 }
+std::vector<HWND> popupWindows(HWND host){
+    struct Search {HWND host;std::vector<HWND> windows;} search{host,{}};
+    EnumWindows([](HWND h,LPARAM data)->BOOL{auto& s=*reinterpret_cast<Search*>(data);
+        if(IsWindowVisible(h) && GetPropW(h,L"PicoPet.PopupHost")==s.host)s.windows.push_back(h);return TRUE;
+    },reinterpret_cast<LPARAM>(&search));return search.windows;
+}
+RECT popupDisplayRect(HWND popup,HWND host,RECT viewport){
+    RECT rect{};GetWindowRect(popup,&rect);MapWindowPoints(nullptr,host,reinterpret_cast<POINT*>(&rect),2);
+    const LONG w=std::max(1L,rect.right-rect.left),h=std::max(1L,rect.bottom-rect.top);
+    const double scale=std::min({1.0,static_cast<double>(viewport.right-viewport.left)/w,static_cast<double>(viewport.bottom-viewport.top)/h});
+    const LONG dw=std::max(1L,static_cast<LONG>(w*scale)),dh=std::max(1L,static_cast<LONG>(h*scale));
+    const LONG x=std::clamp(rect.right-dw,viewport.left,viewport.right-dw),y=std::clamp(rect.top,viewport.top,viewport.bottom-dh);
+    return {x,y,x+dw,y+dh};
+}
 struct Capture {
     struct State {
         HWND window=nullptr;std::atomic_bool stop=false,paused=false;std::atomic_int fps=60,resolution=0;std::atomic_bool single=true,immersive=false;
@@ -95,6 +109,7 @@ struct Capture {
             const auto previous=SelectObject(dc,bitmap);
             HDC sourceDC=CreateCompatibleDC(dc);BITMAPINFO sourceInfo=info;sourceInfo.bmiHeader.biWidth=SourceWidth;sourceInfo.bmiHeader.biHeight=-SourceHeight;void* sourcePixels=nullptr;HBITMAP sourceBitmap=CreateDIBSection(sourceDC,&sourceInfo,DIB_RGB_COLORS,&sourcePixels,nullptr,0);const auto sourcePrevious=SelectObject(sourceDC,sourceBitmap);
             if(!sourceDC || !sourceBitmap){SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);if(sourceBitmap)DeleteObject(sourceBitmap);if(sourceDC)DeleteDC(sourceDC);return;}
+            HDC popupDC=nullptr;HBITMAP popupBitmap=nullptr;HGDIOBJ popupPrevious=nullptr;
             HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
             if(!timer)timer=CreateWaitableTimerW(nullptr,FALSE,nullptr);
             auto changedAt=std::chrono::steady_clock::now();
@@ -114,6 +129,19 @@ struct Capture {
                         DWORD_PTR result=0;if(SendMessageTimeoutW(*it,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,40,&result))PrintWindow(*it,sourceDC,2);
                         RestoreDC(sourceDC,saved);
                     }
+                    RECT viewport{0,0,size.cx,size.cy};
+                    if(immersive && !children.empty())viewport=contentRect(children.front());
+                    const auto popups=popupWindows(shared->window);
+                    if(!popups.empty() && !popupDC){popupDC=CreateCompatibleDC(dc);popupBitmap=CreateCompatibleBitmap(dc,SourceWidth,SourceHeight);if(popupDC && popupBitmap)popupPrevious=SelectObject(popupDC,popupBitmap);}
+                    for(auto it=popups.rbegin();it!=popups.rend() && !shared->stop;++it){
+                        RECT source{};GetWindowRect(*it,&source);const int pw=std::min<LONG>(source.right-source.left,SourceWidth),ph=std::min<LONG>(source.bottom-source.top,SourceHeight);
+                        const RECT destination=popupDisplayRect(*it,shared->window,viewport);DWORD_PTR result=0;
+                        if(popupDC && popupBitmap && pw>0 && ph>0 && SendMessageTimeoutW(*it,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,40,&result) && PrintWindow(*it,popupDC,2)){
+                            HDC output=immersive?dc:sourceDC;RECT d=destination;
+                            if(immersive)d={MulDiv(d.left-viewport.left,Width,viewport.right-viewport.left),MulDiv(d.top-viewport.top,Height,viewport.bottom-viewport.top),MulDiv(d.right-viewport.left,Width,viewport.right-viewport.left),MulDiv(d.bottom-viewport.top,Height,viewport.bottom-viewport.top)};
+                            SetStretchBltMode(output,HALFTONE);StretchBlt(output,d.left,d.top,d.right-d.left,d.bottom-d.top,popupDC,0,0,pw,ph,SRCCOPY);
+                        }
+                    }
                     if(!immersive){SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,0,0,Width,Height,sourceDC,0,0,size.cx,size.cy,SRCCOPY);}
                     GdiFlush();for(int i=0;i<Width*Height;++i)pixels[i]|=0xff000000u;
                     auto& link=*shared->link;
@@ -131,7 +159,7 @@ struct Capture {
                 else if(timer && remaining.count()>0){LARGE_INTEGER due{};due.QuadPart=-std::max<LONGLONG>(1,remaining.count()/100);SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE);HANDLE waits[]={shared->wake,timer};if(WaitForMultipleObjects(2,waits,FALSE,250)==WAIT_OBJECT_0)changedAt=std::chrono::steady_clock::now();}
                 else {if(WaitForSingleObject(shared->wake,1)==WAIT_OBJECT_0)changedAt=std::chrono::steady_clock::now();}
             }
-            if(timer)CloseHandle(timer);
+            if(timer)CloseHandle(timer);if(popupPrevious)SelectObject(popupDC,popupPrevious);if(popupBitmap)DeleteObject(popupBitmap);if(popupDC)DeleteDC(popupDC);
             SelectObject(sourceDC,sourcePrevious);DeleteObject(sourceBitmap);DeleteDC(sourceDC);SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);
         }).detach();
     }
@@ -181,33 +209,62 @@ struct Shutdown {
     }
 };
 struct Host {
-    struct InputHook {DWORD thread;HHOOK hook;};
-    HMODULE inputModule=nullptr;HOOKPROC inputProc=nullptr;std::vector<InputHook> inputHooks;std::vector<HWND> hoverWindows;
+    struct InputHook {DWORD thread;HHOOK hook,windowHook;};
+    HMODULE inputModule=nullptr;HOOKPROC inputProc=nullptr,windowProc=nullptr;std::vector<InputHook> inputHooks;std::vector<HWND> hoverWindows;
+    inline static Host* eventHost=nullptr;HWINEVENTHOOK popupEvents=nullptr;
     Link link;Capture capture;HWND window=nullptr,focus=nullptr,drag=nullptr,pointerCapture=nullptr;HANDLE parent=nullptr;
-    ~Host(){release();if(inputModule)FreeLibrary(inputModule);}
+    ~Host(){if(popupEvents)UnhookWinEvent(popupEvents);if(eventHost==this)eventHost=nullptr;release();if(inputModule)FreeLibrary(inputModule);}
     std::vector<Entry> entries;bool immersive=false,paused=false;int mode=0,fps=60,resolution=0,width=Width,height=Height;POINT origin{};RECT dragRect{};ULONGLONG checked=0;
     void status(const wchar_t* text){if(link.lock()){wcscpy_s(link.data->status,text);link.data->count=static_cast<LONG>(entries.size());++link.data->generation;link.unlock();}}
     void restore(Entry& e){
         DWORD pid=0;GetWindowThreadProcessId(e.window,&pid);if(!IsWindow(e.window) || pid!=e.pid)return;
+        for(HWND popup:popupWindows(window)){RemovePropW(popup,L"PicoPet.PopupHost");PostMessageW(popup,WM_CLOSE,0,0);}
+        RemovePropW(e.window,L"PicoPet.ApplicationHost");PostMessageW(e.window,WM_CANCELMODE,0,0);
         SetParent(e.window,e.parent);SetWindowLongPtrW(e.window,GWL_STYLE,e.style);SetWindowLongPtrW(e.window,GWL_EXSTYLE,e.exstyle);
         if(!e.parent)SetWindowLongPtrW(e.window,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(IsWindow(e.owner)?e.owner:nullptr));
         SetWindowPos(e.window,nullptr,e.rect.left,e.rect.top,e.rect.right-e.rect.left,e.rect.bottom-e.rect.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_FRAMECHANGED);
         SetWindowPlacement(e.window,&e.placement);ShowWindow(e.window,(e.style&WS_VISIBLE)?(e.placement.showCmd==SW_SHOWMINIMIZED?SW_SHOWMINIMIZED:SW_SHOWNOACTIVATE):SW_HIDE);
     }
     void clearHover(){for(HWND h:hoverWindows){if(GetPropW(h,L"PicoPet.ProjectedHover")==window){RemovePropW(h,L"PicoPet.ProjectedHover");PostMessageW(h,WM_MOUSELEAVE,0,0);}}hoverWindows.clear();}
-    bool trackHover(HWND target){
+    bool hookThread(HWND target){
         const DWORD thread=GetWindowThreadProcessId(target,nullptr);
         if(std::none_of(inputHooks.begin(),inputHooks.end(),[thread](const InputHook& hook){return hook.thread==thread;})){
-            if(!inputModule){wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);const auto library=std::filesystem::path(path).parent_path()/L"PicoPet.Input.dll";inputModule=LoadLibraryW(library.c_str());if(inputModule)inputProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppInputMessage"));}
+            if(!inputModule){wchar_t path[32768]{};GetModuleFileNameW(nullptr,path,32768);const auto library=std::filesystem::path(path).parent_path()/L"PicoPet.Input.dll";inputModule=LoadLibraryW(library.c_str());if(inputModule){inputProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppInputMessage"));windowProc=reinterpret_cast<HOOKPROC>(GetProcAddress(inputModule,"AppWindowMessage"));}}
             HHOOK hook=inputProc?SetWindowsHookExW(WH_GETMESSAGE,inputProc,inputModule,thread):nullptr;
-            if(!hook)return false;inputHooks.push_back({thread,hook});
+            if(!hook)return false;HHOOK windowHook=windowProc?SetWindowsHookExW(WH_CALLWNDPROC,windowProc,inputModule,thread):nullptr;inputHooks.push_back({thread,hook,windowHook});
         }
+        return true;
+    }
+    bool trackHover(HWND target){
+        if(!hookThread(target))return false;
         std::vector<HWND> next;for(HWND h=target;h && h!=window;h=GetParent(h))next.push_back(h);
         if(next==hoverWindows)return true;
         for(HWND old:hoverWindows)if(std::find(next.begin(),next.end(),old)==next.end() && GetPropW(old,L"PicoPet.ProjectedHover")==window){RemovePropW(old,L"PicoPet.ProjectedHover");PostMessageW(old,WM_MOUSELEAVE,0,0);}
         for(HWND h:next)SetPropW(h,L"PicoPet.ProjectedHover",window);hoverWindows=std::move(next);return true;
     }
-    void release(){capture.stop();clearHover();for(auto& hook:inputHooks)UnhookWindowsHookEx(hook.hook);inputHooks.clear();pointerCapture=nullptr;for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
+    void release(){capture.stop();clearHover();for(HWND popup:popupWindows(window)){RemovePropW(popup,L"PicoPet.PopupHost");PostMessageW(popup,WM_CLOSE,0,0);}for(auto& hook:inputHooks){UnhookWindowsHookEx(hook.hook);if(hook.windowHook)UnhookWindowsHookEx(hook.windowHook);}inputHooks.clear();pointerCapture=nullptr;for(auto it=entries.rbegin();it!=entries.rend();++it)restore(*it);entries.clear();focus=nullptr;}
+    bool ownedPopup(HWND popup)const{
+        const auto style=GetWindowLongPtrW(popup,GWL_STYLE);
+        if(!IsWindow(popup) || !(style&WS_POPUP) || (style&(WS_CHILD|WS_CAPTION)))return false;
+        DWORD popupPid=0;GetWindowThreadProcessId(popup,&popupPid);
+        for(HWND owner=GetWindow(popup,GW_OWNER);owner;owner=GetWindow(owner,GW_OWNER)){
+            if(owner==window && std::any_of(entries.begin(),entries.end(),[popupPid](const Entry& e){return e.pid==popupPid;}))return true;
+            if(std::any_of(entries.begin(),entries.end(),[owner](const Entry& e){return e.window==owner || IsChild(e.window,owner);}))return true;
+        }
+        return false;
+    }
+    void updatePopup(HWND popup){
+        if(!IsWindowVisible(popup) || !ownedPopup(popup))return;
+        SetPropW(popup,L"PicoPet.PopupHost",window);hookThread(popup);
+        RECT hostRect{},rect{};GetWindowRect(window,&hostRect);GetWindowRect(popup,&rect);
+        const int x=std::clamp<LONG>(rect.left,hostRect.left,std::max(hostRect.left,hostRect.left+width-(rect.right-rect.left)));
+        const int y=std::clamp<LONG>(rect.top,hostRect.top,std::max(hostRect.top,hostRect.top+height-(rect.bottom-rect.top)));
+        if(x!=rect.left || y!=rect.top)SetWindowPos(popup,nullptr,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER|SWP_ASYNCWINDOWPOS);
+        capture.wake();
+    }
+    static void CALLBACK popupEvent(HWINEVENTHOOK,DWORD event,HWND target,LONG object,LONG child,DWORD,DWORD){
+        if(eventHost && object==OBJID_WINDOW && child==CHILDID_SELF && (event==EVENT_OBJECT_SHOW || event==EVENT_OBJECT_LOCATIONCHANGE) && eventHost->ownedPopup(target))PostMessageW(eventHost->window,PopupChanged,0,reinterpret_cast<LPARAM>(target));
+    }
     HWND application(HWND child)const{while(IsWindow(child) && GetParent(child)!=window)child=GetParent(child);return IsWindow(child) && GetParent(child)==window?child:nullptr;}
     HWND keyboardTarget()const{
         HWND root=application(focus);if(!root)return nullptr;
@@ -258,10 +315,12 @@ struct Host {
         SetLastError(0);SetParent(target,window);
         if(GetParent(target)!=window){restore(e);status(L"该窗口不接受嵌入，或权限级别不同；已恢复原窗口");return false;}
         SetWindowLongPtrW(target,GWL_EXSTYLE,e.exstyle&~(WS_EX_APPWINDOW|WS_EX_TOPMOST));
+        SetPropW(target,L"PicoPet.ApplicationHost",window);hookThread(target);
         entries.push_back(e);focus=target;layout();SetWindowPos(target,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);return true;
     }
     HWND childAt(POINT point){
         HWND target=window;POINT local=point;
+
         for(int i=0;i<16;++i){HWND child=ChildWindowFromPointEx(target,local,CWP_SKIPINVISIBLE|CWP_SKIPDISABLED|CWP_SKIPTRANSPARENT);if(!child || child==target)break;MapWindowPoints(target,child,&local,1);target=child;}
         return target;
     }
@@ -273,11 +332,21 @@ struct Host {
             if(message==WM_LBUTTONUP){drag=nullptr;pointerCapture=nullptr;}return;
         }
         if(immersive){HWND top=GetWindow(window,GW_CHILD);if(top){const RECT area=contentRect(top);POINT clientOrigin{};ClientToScreen(top,&clientOrigin);RECT outer{};GetWindowRect(top,&outer);point={area.left+MulDiv(point.x,area.right-area.left,Width)+outer.left-clientOrigin.x,area.top+MulDiv(point.y,area.bottom-area.top,Height)+outer.top-clientOrigin.y};MapWindowPoints(top,window,&point,1);}}
+        RECT viewport{0,0,width,height};if(immersive){HWND top=GetWindow(window,GW_CHILD);if(top)viewport=contentRect(top);}
+        for(HWND popup:popupWindows(window)){
+            const RECT display=popupDisplayRect(popup,window,viewport);
+            if(PtInRect(&display,point)){
+                RECT rect{};GetWindowRect(popup,&rect);
+                POINT screen{rect.left+MulDiv(point.x-display.left,rect.right-rect.left,display.right-display.left),rect.top+MulDiv(point.y-display.top,rect.bottom-rect.top,display.bottom-display.top)};
+                POINT local=screen;ScreenToClient(popup,&local);trackHover(popup);
+                PostMessageW(popup,message,buttons,(message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL)?MAKELPARAM(screen.x,screen.y):MAKELPARAM(local.x,local.y));capture.wake();return;
+            }
+        }
         HWND target=IsWindow(pointerCapture) && (message==WM_MOUSEMOVE || message==WM_LBUTTONUP)?pointerCapture:childAt(point);if(target==window)return;
         if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN)trackHover(target);
         POINT screen=point;ClientToScreen(window,&screen);DWORD_PTR area=HTCLIENT;
         if(message!=WM_MOUSEMOVE && message!=WM_MOUSEWHEEL && message!=WM_MOUSEHWHEEL)SendMessageTimeoutW(target,WM_NCHITTEST,0,MAKELPARAM(screen.x,screen.y),SMTO_ABORTIFHUNG|SMTO_BLOCK,30,&area);
-        if(message==WM_LBUTTONDOWN){pointerCapture=target;activate(target);HWND root=application(target);SetWindowPos(root,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        if(message==WM_LBUTTONDOWN){pointerCapture=target;const bool popup=GetPropW(target,L"PicoPet.PopupHost")==window;if(!popup)activate(target);HWND root=application(target);if(root)SetWindowPos(root,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
             if(area==HTCAPTION && mode==1 && !immersive){drag=root;origin=point;GetWindowRect(root,&dragRect);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&dragRect),2);return;}}
         if(area!=HTCLIENT && (message==WM_LBUTTONUP || message==WM_LBUTTONDBLCLK)){
             if(area==HTMAXBUTTON || (area==HTCAPTION && message==WM_LBUTTONDBLCLK)){SetWindowPos(target,nullptr,0,0,width,height,SWP_NOACTIVATE|SWP_NOZORDER);return;}
@@ -309,6 +378,7 @@ struct Host {
         if(self->link.data->quitting && m>=Attach && m<=Immersive && m!=Paused)return 0;
         switch(m){
         case WM_TIMER:self->tick();return 0;
+        case PopupChanged:self->updatePopup(reinterpret_cast<HWND>(l));return 0;
         case Attach:self->attach(reinterpret_cast<HWND>(l));return 0;
         case Configure:self->mode=LOWORD(w);self->resolution=std::clamp<int>(HIWORD(w),0,3);self->fps=std::clamp(static_cast<int>(l),5,60);self->capture.rate(self->fps);self->layout();return 0;
         case Release:if(!self->entries.empty()){self->clearHover();self->restore(self->entries.back());self->entries.pop_back();self->focus=self->entries.empty()?nullptr:self->entries.back().window;self->layout();}return 0;
@@ -337,6 +407,7 @@ int runHost(const wchar_t* mappingName){
         HWND window=CreateWindowExW(WS_EX_TOOLWINDOW,type.lpszClassName,L"PICO application workspace",WS_POPUP|WS_CLIPCHILDREN,GetSystemMetrics(SM_XVIRTUALSCREEN)-Width-32,GetSystemMetrics(SM_YVIRTUALSCREEN),Width,Height,nullptr,nullptr,type.hInstance,&host);
         if(!window){CloseHandle(host.parent);return 4;}
         const DWMNCRENDERINGPOLICY policy=DWMNCRP_DISABLED;DwmSetWindowAttribute(window,DWMWA_NCRENDERING_POLICY,&policy,sizeof(policy));
+        Host::eventHost=&host;host.popupEvents=SetWinEventHook(EVENT_OBJECT_SHOW,EVENT_OBJECT_LOCATIONCHANGE,nullptr,Host::popupEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
         ShowWindow(window,SW_SHOWNOACTIVATE);
         host.capture.start(window,mappingName);host.mode=host.link.data->mode;host.fps=host.link.data->fps;host.capture.rate(host.fps);host.capture.single(host.mode==0);
         host.resolution=host.link.data->resolution;host.layout();
